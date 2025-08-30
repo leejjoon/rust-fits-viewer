@@ -1,0 +1,12 @@
+# Rust
+target/
+.rustc_info.json
+
+# Python
+__pycache__/
+*.pyc
+.env
+
+# Other
+server.log
+tile.dat

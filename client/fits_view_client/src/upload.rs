@@ -26,8 +26,8 @@ pub fn upload_r32float_texture(
 
     let layout = ImageDataLayout {
         offset: 0,
-        bytes_per_row: Some(NonZeroU32::new(4 * tile.header.width).unwrap()),
-        rows_per_image: Some(NonZeroU32::new(tile.header.height).unwrap()),
+        bytes_per_row: Some(NonZeroU32::new(4 * tile.header.width).unwrap().into()),
+        rows_per_image: Some(NonZeroU32::new(tile.header.height).unwrap().into()),
     };
 
     queue.write_texture(

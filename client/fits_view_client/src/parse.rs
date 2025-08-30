@@ -1,5 +1,5 @@
 // client/src/parse.rs
-use crate::raw_header::{RawTileHeader, RAW_HEADER_SIZE, DT_F32, ENDIAN_LITTLE};
+use crate::raw_header::{RawTileHeader, DT_F32, ENDIAN_LITTLE};
 
 pub struct RawTile<'a> {
     pub header: RawTileHeader,
