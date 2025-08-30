@@ -6,9 +6,10 @@ edition = "2024"
 [dependencies]
 bytemuck = { version = "1.13", features = ["derive"] }
 egui = "0.22"
-eframe = "0.22"
+eframe = { version = "0.22", default-features = false, features = ["wgpu"] }
 egui-wgpu = "0.22"
 wgpu = "0.16"
 tokio = { version = "1", features = ["full"] }
-reqwest = "0.11"
+reqwest = { version = "0.11", features = ["json", "blocking"] }
+serde = { version = "1.0", features = ["derive"] }
 image = "0.24"

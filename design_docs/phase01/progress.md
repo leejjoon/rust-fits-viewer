@@ -6,27 +6,27 @@ This document outlines the progress made on the FITS-View prototype as of 2025-0
 
 ## Completed Work
 
-1.  **Project Structure:**
-    *   The initial directory structure for both the Python server and the Rust client has been created.
+1.  **Project Structure & Initial Fixes:**
+    *   The initial compilation blockers in the Rust client have been resolved.
+    *   A `.gitignore` file has been added to the project.
 
 2.  **Python Server (FastAPI):**
-    *   The FastAPI server has been fully implemented according to the blueprint.
-    *   The `RawTileHeader` dataclass and serialization logic are in place.
-    *   The `/tile/{z}/{x}/{y}` endpoint is functional and serves raw tile data with the correct binary header.
-    *   The server has been tested and verified to be working correctly.
+    *   The server implementation has been updated to be more realistic. It now serves data from a persistent, global NumPy array instead of random data.
+    *   The `GET /meta` endpoint has been implemented as per the blueprint, providing clients with necessary metadata about the image.
+
+3.  **Rust Client (wgpu + egui):**
+    *   The client has been updated to a modern `eframe` application structure.
+    *   The client now fetches and displays metadata from the server's `/meta` endpoint upon startup.
+    *   The `wgpu` rendering backend has been initialized and integrated into the `eframe` application.
+    *   A custom paint callback has been set up to allow for custom `wgpu` rendering.
 
 ## In Progress & Blockers
 
-1.  **Rust Client (wgpu + egui):**
-    *   The initial file structure for the Rust client has been created.
-    *   The `raw_header.rs`, `parse.rs`, and `upload.rs` modules have been implemented based on the design documents.
-    *   **BLOCKER:** The Rust client implementation is currently blocked by a persistent issue with the `cargo` command in the development environment. All `cargo` commands (including `cargo check` and `cargo new`) fail with the error "Could not locate working directory". This issue prevents any further progress on the Rust client.
+1.  **Test Texture Rendering:**
+    *   The code to render a test texture (a checkerboard pattern) to a quad has been written. This includes the WGSL shaders, `wgpu` pipeline, buffers, and bind groups.
+    *   **BLOCKER:** The client code currently does not compile. It is blocked by a complex Rust lifetime issue within the `egui_wgpu` paint callback. The compiler is unable to prove that the rendering resources outlive the `wgpu::RenderPass` they are used in. This is a common issue when integrating `wgpu` with frameworks that use callbacks, and it requires a specific ownership/borrowing pattern to resolve.
 
 ## Next Steps
 
-1.  **Resolve Environment Issue:** The immediate next step is to resolve the `cargo` environment issue. Without this, no further work can be done on the Rust client.
-2.  **Continue Rust Client Implementation:** Once the environment issue is resolved, the plan is to continue with the implementation of the Rust client, including:
-    *   Basic client-server integration.
-    *   Implementation of the `wgpu` rendering pipeline.
-    *   Implementation of user interactions (panning, zooming, rotation).
-    *   Testing and refinement.
+1.  **Resolve Lifetime Issue:** The immediate next step is to resolve the lifetime compilation error in the Rust client's rendering code.
+2.  **Continue Client Implementation:** Once the client compiles, the plan is to continue with the rendering implementation, followed by user interactions (pan, zoom, rotate) and tile caching.
