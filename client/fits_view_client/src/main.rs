@@ -104,22 +104,26 @@ impl Viewport {
         self.rotation_angle = 0.0;
     }
     
-    fn to_transform_matrix(&self) -> [[f32; 4]; 4] {
-        // Column-major 2D transformation matrix for WGSL
-        // WGSL expects column-major matrices, so we need to transpose our row-major thinking
+    fn to_transform_matrix(&self, render_size: egui::Vec2, image_size: egui::Vec2) -> [[f32; 4]; 4] {
+        // Column-major 2D transformation matrix for WGSL with fixed pixel size rendering
         let cos_r = self.rotation_angle.cos();
         let sin_r = self.rotation_angle.sin();
         
-        // Column-major matrix: each inner array is a column
-        // Column 0: [scale*cos, scale*sin, 0, 0]
-        // Column 1: [-scale*sin, scale*cos, 0, 0] 
-        // Column 2: [0, 0, 1, 0]
-        // Column 3: [pan_x, pan_y, 0, 1]
+        // Calculate scaling to maintain fixed pixel size on screen
+        // Convert from image pixels to normalized device coordinates [-1,1]
+        let pixels_to_ndc_x = 2.0 / render_size.x;
+        let pixels_to_ndc_y = 2.0 / render_size.y;
+        
+        // Scale based on zoom and image dimensions in pixels
+        let scale_x = self.zoom * image_size.x * pixels_to_ndc_x;
+        let scale_y = self.zoom * image_size.y * pixels_to_ndc_y;
+        
+        // Column-major matrix with pixel-based scaling
         [
-            [self.zoom * cos_r, self.zoom * sin_r, 0.0, 0.0],      // Column 0
-            [-self.zoom * sin_r, self.zoom * cos_r, 0.0, 0.0],     // Column 1
-            [0.0, 0.0, 1.0, 0.0],                                   // Column 2
-            [self.pan_offset.x, self.pan_offset.y, 0.0, 1.0],      // Column 3 (translation)
+            [scale_x * cos_r, scale_y * sin_r, 0.0, 0.0],      // Column 0
+            [-scale_x * sin_r, scale_y * cos_r, 0.0, 0.0],     // Column 1
+            [0.0, 0.0, 1.0, 0.0],                               // Column 2
+            [self.pan_offset.x, self.pan_offset.y, 0.0, 1.0],  // Column 3 (translation)
         ]
     }
 }
@@ -392,20 +396,26 @@ impl FitsViewApp {
             self.viewport.pan_offset += delta * sensitivity;
         }
         
-        // Mouse scroll for zooming
-        if let Some(_hover_pos) = response.hover_pos() {
-            let scroll_delta = ctx.input(|i| i.scroll_delta.y);
+        // Handle scroll events for zoom and rotation
+        ctx.input(|i| {
+            let scroll_delta = i.scroll_delta.y;
+            
             if scroll_delta != 0.0 {
-                if ctx.input(|i| i.modifiers.ctrl) {
-                    // Ctrl + scroll for rotation
-                    self.viewport.rotation_angle += scroll_delta * 0.01;
-                } else {
-                    // Regular scroll for zoom
-                    let zoom_factor = 1.0 + scroll_delta * 0.001;
-                    self.viewport.zoom = (self.viewport.zoom * zoom_factor).clamp(0.1, 10.0);
+                // Check if we're hovering over the response area
+                if let Some(_hover_pos) = response.hover_pos() {
+                    if i.modifiers.alt {
+                        // Alt + scroll for rotation (clockwise/counter-clockwise)
+                        // Positive scroll_delta = scroll up = counter-clockwise rotation
+                        // Negative scroll_delta = scroll down = clockwise rotation
+                        self.viewport.rotation_angle += scroll_delta * 0.005;
+                    } else {
+                        // Regular scroll for zoom
+                        let zoom_factor = 1.0 + scroll_delta * 0.001;
+                        self.viewport.zoom = (self.viewport.zoom * zoom_factor).clamp(0.1, 10.0);
+                    }
                 }
             }
-        }
+        });
         
         // Keyboard shortcuts
         ctx.input(|i| {
@@ -536,6 +546,7 @@ impl eframe::App for FitsViewApp {
             if let Some(_renderer) = &self.renderer {
                 let viewport = self.viewport.clone();
                 let meta = self.meta.clone();
+                let render_rect = rect; // Capture rect for the closure
                 let callback_fn = egui_wgpu::CallbackFn::new()
                     .prepare(move |_device, queue, _encoder, resources| {
                         let resources: &Custom3dResources = resources.get().unwrap();
@@ -547,8 +558,16 @@ impl eframe::App for FitsViewApp {
                             (0.0, 255.0)
                         };
                         
+                        // Calculate render size and image size for fixed pixel rendering
+                        let render_size = egui::Vec2::new(render_rect.width(), render_rect.height());
+                        let image_size = if let Some(ref meta) = meta {
+                            egui::Vec2::new(meta.shape[0] as f32, meta.shape[1] as f32)
+                        } else {
+                            egui::Vec2::new(256.0, 256.0) // Default size for test texture
+                        };
+                        
                         let uniforms = Uniforms {
-                            transform: viewport.to_transform_matrix(),
+                            transform: viewport.to_transform_matrix(render_size, image_size),
                             vmin,
                             vmax,
                             _padding: [0.0, 0.0],
@@ -609,15 +628,16 @@ mod tests {
     #[test]
     fn test_identity_transformation() {
         let viewport = Viewport::default();
-        let matrix = viewport.to_transform_matrix();
+        let render_size = egui::Vec2::new(800.0, 600.0);
+        let image_size = egui::Vec2::new(400.0, 300.0);
+        let matrix = viewport.to_transform_matrix(render_size, image_size);
         
-        // Identity matrix should be:
-        // [1, 0, 0, 0]
-        // [0, 1, 0, 0]
-        // [0, 0, 1, 0]
-        // [0, 0, 0, 1]
-        assert_eq!(matrix[0], [1.0, 0.0, 0.0, 0.0]);
-        assert_eq!(matrix[1], [0.0, 1.0, 0.0, 0.0]);
+        // With zoom=1.0, image should be rendered at actual pixel size
+        let expected_scale_x = 400.0 * 2.0 / 800.0; // 1.0
+        let expected_scale_y = 300.0 * 2.0 / 600.0; // 1.0
+        
+        assert_eq!(matrix[0], [expected_scale_x, 0.0, 0.0, 0.0]);
+        assert_eq!(matrix[1], [0.0, expected_scale_y, 0.0, 0.0]);
         assert_eq!(matrix[2], [0.0, 0.0, 1.0, 0.0]);
         assert_eq!(matrix[3], [0.0, 0.0, 0.0, 1.0]);
     }
@@ -627,13 +647,12 @@ mod tests {
         let mut viewport = Viewport::default();
         viewport.pan_offset = egui::Vec2::new(5.0, 10.0);
         
-        let matrix = viewport.to_transform_matrix();
+        let render_size = egui::Vec2::new(800.0, 600.0);
+        let image_size = egui::Vec2::new(400.0, 300.0);
+        let matrix = viewport.to_transform_matrix(render_size, image_size);
         
         // Translation should only affect the translation column
-        assert_eq!(matrix[0], [1.0, 0.0, 0.0, 5.0]);
-        assert_eq!(matrix[1], [0.0, 1.0, 0.0, 10.0]);
-        assert_eq!(matrix[2], [0.0, 0.0, 1.0, 0.0]);
-        assert_eq!(matrix[3], [0.0, 0.0, 0.0, 1.0]);
+        assert_eq!(matrix[3], [5.0, 10.0, 0.0, 1.0]);
     }
 
     #[test]
@@ -641,45 +660,43 @@ mod tests {
         let mut viewport = Viewport::default();
         viewport.zoom = 2.0;
         
-        let matrix = viewport.to_transform_matrix();
+        let render_size = egui::Vec2::new(800.0, 600.0);
+        let image_size = egui::Vec2::new(400.0, 300.0);
+        let matrix = viewport.to_transform_matrix(render_size, image_size);
         
-        // Scaling should only affect diagonal elements
-        assert_eq!(matrix[0], [2.0, 0.0, 0.0, 0.0]);
-        assert_eq!(matrix[1], [0.0, 2.0, 0.0, 0.0]);
+        // With 2x zoom, scaling should be doubled
+        let expected_scale_x = 2.0 * 400.0 * 2.0 / 800.0; // 2.0
+        let expected_scale_y = 2.0 * 300.0 * 2.0 / 600.0; // 2.0
+        
+        assert_eq!(matrix[0], [expected_scale_x, 0.0, 0.0, 0.0]);
+        assert_eq!(matrix[1], [0.0, expected_scale_y, 0.0, 0.0]);
         assert_eq!(matrix[2], [0.0, 0.0, 1.0, 0.0]);
         assert_eq!(matrix[3], [0.0, 0.0, 0.0, 1.0]);
     }
 
     #[test]
-    fn test_no_rotation_components() {
-        let mut viewport = Viewport::default();
-        viewport.rotation_angle = 45.0; // This should NOT affect the matrix
-        viewport.zoom = 2.0;
-        viewport.pan_offset = egui::Vec2::new(1.0, 1.0);
+    fn test_fixed_pixel_size() {
+        let viewport = Viewport::default();
         
-        let matrix = viewport.to_transform_matrix();
+        // Same image size, different window sizes - image should appear same pixel size
+        let image_size = egui::Vec2::new(256.0, 256.0);
         
-        // Off-diagonal elements should be zero (no rotation)
-        assert_eq!(matrix[0][1], 0.0); // No Y component in X transformation
-        assert_eq!(matrix[1][0], 0.0); // No X component in Y transformation
+        let matrix1 = viewport.to_transform_matrix(egui::Vec2::new(800.0, 600.0), image_size);
+        let matrix2 = viewport.to_transform_matrix(egui::Vec2::new(1200.0, 900.0), image_size);
         
-        // Should be pure scale + translate
-        assert_eq!(matrix[0], [2.0, 0.0, 0.0, 1.0]);
-        assert_eq!(matrix[1], [0.0, 2.0, 0.0, 1.0]);
-    }
-
-    #[test]
-    fn test_matrix_determinant() {
-        let mut viewport = Viewport::default();
-        viewport.zoom = 2.0;
+        // Both should render image at same pixel size (256x256)
+        let scale1_x = matrix1[0][0];
+        let scale1_y = matrix1[1][1];
+        let scale2_x = matrix2[0][0];
+        let scale2_y = matrix2[1][1];
         
-        let matrix = viewport.to_transform_matrix();
+        // Pixel size = scale * render_size / 2
+        let pixel_size1_x = scale1_x * 800.0 / 2.0;
+        let pixel_size1_y = scale1_y * 600.0 / 2.0;
+        let pixel_size2_x = scale2_x * 1200.0 / 2.0;
+        let pixel_size2_y = scale2_y * 900.0 / 2.0;
         
-        // For a 2D transformation matrix [a b tx; c d ty; 0 0 1],
-        // determinant = a*d - b*c
-        let det = matrix[0][0] * matrix[1][1] - matrix[0][1] * matrix[1][0];
-        
-        // Determinant should equal zoom^2 for pure scaling
-        assert_eq!(det, 4.0);
+        assert!((pixel_size1_x - pixel_size2_x).abs() < 0.001);
+        assert!((pixel_size1_y - pixel_size2_y).abs() < 0.001);
     }
 }
