@@ -12,6 +12,7 @@ struct VertexOutput {
 
 struct Uniforms {
     transform: mat4x4<f32>,
+    tile_offset: vec2<f32>,
     vmin: f32,
     vmax: f32,
 };
@@ -26,12 +27,14 @@ fn vs_main(
     var out: VertexOutput;
     out.tex_coords = model.tex_coords;
     
-    // Apply 2D screen-space transformation
-    // Transform the 2D position directly without 3D depth effects
-    let pos_2d = vec2<f32>(model.position.x, model.position.y);
-    let transformed_2d = (uniforms.transform * vec4<f32>(pos_2d, 0.0, 1.0)).xy;
+    // Scale the unit quad [0,1] to tile size (256x256 pixels) and offset by tile position
+    let tile_size = 256.0;
+    let tile_pos = model.position * tile_size + uniforms.tile_offset;
     
-    // Keep Z at 0 for pure 2D rendering (no depth/3D effects)
+    // Apply viewport transformation (pan, zoom, rotation)
+    let transformed_2d = (uniforms.transform * vec4<f32>(tile_pos, 0.0, 1.0)).xy;
+    
+    // Keep Z at 0 for pure 2D rendering
     out.clip_position = vec4<f32>(transformed_2d, 0.0, 1.0);
     
     return out;

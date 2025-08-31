@@ -57,10 +57,10 @@ impl Vertex {
 }
 
 const VERTICES: &[Vertex] = &[
-    Vertex { position: [-1.0, -1.0], tex_coords: [0.0, 1.0] }, // A
-    Vertex { position: [1.0, -1.0], tex_coords: [1.0, 1.0] }, // B
-    Vertex { position: [1.0, 1.0], tex_coords: [1.0, 0.0] }, // C
-    Vertex { position: [-1.0, 1.0], tex_coords: [0.0, 0.0] }, // D
+    Vertex { position: [0.0, 0.0], tex_coords: [0.0, 1.0] }, // Bottom-left
+    Vertex { position: [1.0, 0.0], tex_coords: [1.0, 1.0] }, // Bottom-right
+    Vertex { position: [1.0, 1.0], tex_coords: [1.0, 0.0] }, // Top-right
+    Vertex { position: [0.0, 1.0], tex_coords: [0.0, 0.0] }, // Top-left
 ];
 
 const INDICES: &[u16] = &[0, 1, 2, 0, 2, 3];
@@ -69,6 +69,7 @@ const INDICES: &[u16] = &[0, 1, 2, 0, 2, 3];
 #[derive(Copy, Clone, Debug, bytemuck::Pod, bytemuck::Zeroable)]
 struct Uniforms {
     transform: [[f32; 4]; 4], // 4x4 transformation matrix
+    tile_offset: [f32; 2], // Tile position offset in image coordinates
     vmin: f32,
     vmax: f32,
     _padding: [f32; 2], // Align to 16 bytes
@@ -79,6 +80,25 @@ struct Viewport {
     zoom: f32,
     pan_offset: egui::Vec2,
     rotation_angle: f32,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+struct TileCoord {
+    z: u32,
+    x: u32,
+    y: u32,
+}
+
+struct TileData {
+    texture: wgpu::Texture,
+    bind_group: wgpu::BindGroup,
+    coord: TileCoord,
+}
+
+struct TileManager {
+    tiles: std::collections::HashMap<TileCoord, TileData>,
+    tile_size: u32,
+    image_size: [u32; 2],
 }
 
 impl Default for Viewport {
@@ -104,26 +124,88 @@ impl Viewport {
         self.rotation_angle = 0.0;
     }
     
+    fn get_visible_tiles(&self, render_size: egui::Vec2, image_size: egui::Vec2, tile_size: u32) -> Vec<TileCoord> {
+        let mut visible_tiles = Vec::new();
+        
+        // Calculate the bounds of the visible area in image coordinates
+        let half_render = render_size * 0.5;
+        let image_center = image_size * 0.5;
+        
+        // Transform viewport bounds to image coordinates
+        let zoom_inv = 1.0 / self.zoom;
+        let visible_half_width = half_render.x * zoom_inv;
+        let visible_half_height = half_render.y * zoom_inv;
+        
+        // For tile visibility, we need to be more generous and show a larger area
+        // to account for the fact that tiles might be partially visible
+        // Use a larger viewport that encompasses the full render area plus some padding
+        let padding_factor = 1.5; // Show 50% more area to catch edge tiles
+        let expanded_half_width = visible_half_width * padding_factor;
+        let expanded_half_height = visible_half_height * padding_factor;
+        
+        // Apply pan offset to determine which part of the image is visible
+        let pan_in_image_x = -self.pan_offset.x * render_size.x * 0.5 * zoom_inv;
+        let pan_in_image_y = self.pan_offset.y * render_size.y * 0.5 * zoom_inv;
+        
+        let center_x = image_center.x + pan_in_image_x;
+        let center_y = image_center.y + pan_in_image_y;
+        
+        let min_x = (center_x - expanded_half_width).max(0.0);
+        let max_x = (center_x + expanded_half_width).min(image_size.x);
+        let min_y = (center_y - expanded_half_height).max(0.0);
+        let max_y = (center_y + expanded_half_height).min(image_size.y);
+        
+        // Convert to tile coordinates
+        let tile_size_f = tile_size as f32;
+        let min_tile_x = (min_x / tile_size_f).floor() as u32;
+        let max_tile_x = (max_x / tile_size_f).ceil() as u32;
+        let min_tile_y = (min_y / tile_size_f).floor() as u32;
+        let max_tile_y = (max_y / tile_size_f).ceil() as u32;
+        
+        
+        // Generate tile coordinates (zoom level 0 for now)
+        let max_tiles_x = (image_size.x as u32 + tile_size - 1) / tile_size;
+        let max_tiles_y = (image_size.y as u32 + tile_size - 1) / tile_size;
+        
+        let mut all_requested = Vec::new();
+        for y in min_tile_y..max_tile_y {
+            for x in min_tile_x..max_tile_x {
+                all_requested.push((x, y));
+                if x < max_tiles_x && y < max_tiles_y {
+                    visible_tiles.push(TileCoord { z: 0, x, y });
+                }
+            }
+        }
+        
+        
+        
+        visible_tiles
+    }
+    
     fn to_transform_matrix(&self, render_size: egui::Vec2, image_size: egui::Vec2) -> [[f32; 4]; 4] {
-        // Column-major 2D transformation matrix for WGSL with fixed pixel size rendering
+        // Column-major 2D transformation matrix for WGSL
         let cos_r = self.rotation_angle.cos();
         let sin_r = self.rotation_angle.sin();
         
-        // Calculate scaling to maintain fixed pixel size on screen
         // Convert from image pixels to normalized device coordinates [-1,1]
         let pixels_to_ndc_x = 2.0 / render_size.x;
         let pixels_to_ndc_y = 2.0 / render_size.y;
         
-        // Scale based on zoom and image dimensions in pixels
-        let scale_x = self.zoom * image_size.x * pixels_to_ndc_x;
-        let scale_y = self.zoom * image_size.y * pixels_to_ndc_y;
+        // Scale by zoom factor only (tile size scaling happens in shader)
+        let scale_x = self.zoom * pixels_to_ndc_x;
+        let scale_y = self.zoom * pixels_to_ndc_y;
         
-        // Column-major matrix with pixel-based scaling
+        // No automatic centering - let the image render from origin (0,0)
+        // The user can pan to center the image as needed
+        let total_offset_x = self.pan_offset.x;
+        let total_offset_y = self.pan_offset.y;
+        
+        // Column-major matrix
         [
             [scale_x * cos_r, scale_y * sin_r, 0.0, 0.0],      // Column 0
             [-scale_x * sin_r, scale_y * cos_r, 0.0, 0.0],     // Column 1
             [0.0, 0.0, 1.0, 0.0],                               // Column 2
-            [self.pan_offset.x, self.pan_offset.y, 0.0, 1.0],  // Column 3 (translation)
+            [total_offset_x, total_offset_y, 0.0, 1.0],        // Column 3 (translation)
         ]
     }
 }
@@ -134,19 +216,97 @@ struct Custom3dResources {
     vertex_buffer: wgpu::Buffer,
     index_buffer: wgpu::Buffer,
     num_indices: u32,
-    diffuse_bind_group: wgpu::BindGroup,
     uniform_bind_group: wgpu::BindGroup,
     uniform_buffer: wgpu::Buffer,
+    tile_manager: TileManager,
+    texture_bind_group_layout: wgpu::BindGroupLayout,
 }
 
 struct Custom3d {
     backend_url: String,
 }
 
+impl TileManager {
+    fn new(tile_size: u32, image_size: [u32; 2]) -> Self {
+        Self {
+            tiles: std::collections::HashMap::new(),
+            tile_size,
+            image_size,
+        }
+    }
+    
+    fn get_or_create_tile(
+        &mut self,
+        coord: TileCoord,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        backend_url: &str,
+        texture_bind_group_layout: &wgpu::BindGroupLayout,
+    ) -> Option<&TileData> {
+        if !self.tiles.contains_key(&coord) {
+            // Fetch tile data
+            if let Ok(tile_bytes) = fetch_tile_data(backend_url, coord.z, coord.x, coord.y) {
+                if let Ok(tile) = parse_raw_tile(&tile_bytes) {
+                    let texture = upload_r32float_texture(device, queue, &tile);
+                    let texture_view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+                    
+                    let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+                        address_mode_u: wgpu::AddressMode::ClampToEdge,
+                        address_mode_v: wgpu::AddressMode::ClampToEdge,
+                        address_mode_w: wgpu::AddressMode::ClampToEdge,
+                        mag_filter: wgpu::FilterMode::Nearest,
+                        min_filter: wgpu::FilterMode::Nearest,
+                        mipmap_filter: wgpu::FilterMode::Nearest,
+                        ..Default::default()
+                    });
+                    
+                    let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+                        layout: texture_bind_group_layout,
+                        entries: &[
+                            wgpu::BindGroupEntry {
+                                binding: 0,
+                                resource: wgpu::BindingResource::TextureView(&texture_view),
+                            },
+                            wgpu::BindGroupEntry {
+                                binding: 1,
+                                resource: wgpu::BindingResource::Sampler(&sampler),
+                            },
+                        ],
+                        label: Some(&format!("tile_bind_group_{}_{}", coord.x, coord.y)),
+                    });
+                    
+                    let tile_data = TileData {
+                        texture,
+                        bind_group,
+                        coord: coord.clone(),
+                    };
+                    
+                    self.tiles.insert(coord.clone(), tile_data);
+                } else {
+                    eprintln!("Failed to parse tile ({}, {})", coord.x, coord.y);
+                    return None;
+                }
+            } else {
+                eprintln!("Failed to fetch tile ({}, {})", coord.x, coord.y);
+                return None;
+            }
+        }
+        
+        self.tiles.get(&coord)
+    }
+    
+    fn get_tile_offset(&self, coord: &TileCoord) -> [f32; 2] {
+        let tile_size_f = self.tile_size as f32;
+        let tile_x = coord.x as f32 * tile_size_f;
+        let tile_y = coord.y as f32 * tile_size_f;
+        [tile_x, tile_y]
+    }
+}
+
 impl Custom3d {
     fn new(wgpu_render_state: &egui_wgpu::RenderState, backend_url: String, meta: Option<&MetaResponse>) -> Self {
         let device = &wgpu_render_state.device;
-        let queue = &wgpu_render_state.queue;
+        let _queue = &wgpu_render_state.queue;
 
         // Get normalization values from metadata
         let (vmin, vmax) = if let Some(meta) = meta {
@@ -155,40 +315,15 @@ impl Custom3d {
             (0.0, 255.0) // Default fallback values
         };
 
-        println!("Using normalization: vmin={}, vmax={}", vmin, vmax);
 
-        // Fetch and create FITS tile texture
-        let diffuse_texture = match fetch_tile_data(&backend_url, 0, 0, 0) {
-            Ok(tile_bytes) => {
-                match parse_raw_tile(&tile_bytes) {
-                    Ok(tile) => {
-                        println!("Successfully parsed tile: {}x{}", tile.header.width, tile.header.height);
-                        upload_r32float_texture(device, queue, &tile)
-                    }
-                    Err(e) => {
-                        eprintln!("Failed to parse tile: {}", e);
-                        // Fallback to test texture
-                        create_test_texture(device, queue)
-                    }
-                }
-            }
-            Err(e) => {
-                eprintln!("Failed to fetch tile: {}", e);
-                // Fallback to test texture
-                create_test_texture(device, queue)
-            }
+        // Initialize tile manager
+        let (tile_size, image_size) = if let Some(meta) = meta {
+            (meta.tile_size, meta.shape)
+        } else {
+            (256, [1024, 1024]) // Default values
         };
-
-        let diffuse_texture_view = diffuse_texture.create_view(&wgpu::TextureViewDescriptor::default());
-        let diffuse_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
-            address_mode_u: wgpu::AddressMode::ClampToEdge,
-            address_mode_v: wgpu::AddressMode::ClampToEdge,
-            address_mode_w: wgpu::AddressMode::ClampToEdge,
-            mag_filter: wgpu::FilterMode::Nearest,
-            min_filter: wgpu::FilterMode::Nearest,
-            mipmap_filter: wgpu::FilterMode::Nearest,
-            ..Default::default()
-        });
+        
+        let tile_manager = TileManager::new(tile_size, image_size);
 
         let texture_bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             entries: &[
@@ -219,8 +354,8 @@ impl Custom3d {
                     visibility: wgpu::ShaderStages::VERTEX | wgpu::ShaderStages::FRAGMENT,
                     ty: wgpu::BindingType::Buffer {
                         ty: wgpu::BufferBindingType::Uniform,
-                        has_dynamic_offset: false,
-                        min_binding_size: None,
+                        has_dynamic_offset: true,
+                        min_binding_size: wgpu::BufferSize::new(std::mem::size_of::<Uniforms>() as u64),
                     },
                     count: None,
                 },
@@ -228,20 +363,7 @@ impl Custom3d {
             label: Some("uniform_bind_group_layout"),
         });
 
-        let diffuse_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            layout: &texture_bind_group_layout,
-            entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: wgpu::BindingResource::TextureView(&diffuse_texture_view),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 1,
-                    resource: wgpu::BindingResource::Sampler(&diffuse_sampler),
-                },
-            ],
-            label: Some("diffuse_bind_group"),
-        });
+        // Note: Individual tile bind groups will be created by TileManager
 
         let identity_matrix = [
             [1.0, 0.0, 0.0, 0.0],
@@ -250,15 +372,15 @@ impl Custom3d {
             [0.0, 0.0, 0.0, 1.0],
         ];
         
-        let uniform_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("Uniform Buffer"),
-            contents: bytemuck::cast_slice(&[Uniforms { 
-                transform: identity_matrix,
-                vmin, 
-                vmax, 
-                _padding: [0.0, 0.0] 
-            }]),
+        // Create a larger uniform buffer to hold multiple tile uniforms
+        // Allocate space for up to 64 tiles with 256-byte alignment
+        let max_tiles = 64;
+        let uniform_buffer_size = max_tiles * 256;
+        let uniform_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("Multi-Tile Uniform Buffer"),
+            size: uniform_buffer_size as u64,
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
         });
 
         let uniform_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -266,7 +388,11 @@ impl Custom3d {
             entries: &[
                 wgpu::BindGroupEntry {
                     binding: 0,
-                    resource: uniform_buffer.as_entire_binding(),
+                    resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
+                        buffer: &uniform_buffer,
+                        offset: 0,
+                        size: wgpu::BufferSize::new(std::mem::size_of::<Uniforms>() as u64),
+                    }),
                 },
             ],
             label: Some("uniform_bind_group"),
@@ -340,9 +466,10 @@ impl Custom3d {
                 vertex_buffer,
                 index_buffer,
                 num_indices,
-                diffuse_bind_group,
                 uniform_bind_group,
                 uniform_buffer,
+                tile_manager,
+                texture_bind_group_layout,
             });
 
         Self { backend_url }
@@ -375,7 +502,17 @@ impl FitsViewApp {
             let wgpu_render_state = cc.wgpu_render_state.as_ref().expect("wgpu backend");
             Some(Custom3d::new(wgpu_render_state, backend_url.clone(), meta.as_ref()))
         };
-        Self { meta, renderer, backend_url, viewport: Viewport::default() }
+        
+        // Initialize viewport with proper centering
+        let mut viewport = Viewport::default();
+        if let Some(meta) = &meta {
+            // Use a reasonable default window size for initial centering
+            let window_size = egui::Vec2::new(800.0, 600.0);
+            let image_size = egui::Vec2::new(meta.shape[0] as f32, meta.shape[1] as f32);
+            viewport.fit_to_window(window_size, image_size);
+        }
+        
+        Self { meta, renderer, backend_url, viewport }
     }
     
     fn handle_input(&mut self, response: &egui::Response, ctx: &egui::Context, frame: &mut eframe::Frame) {
@@ -402,16 +539,49 @@ impl FitsViewApp {
             
             if scroll_delta != 0.0 {
                 // Check if we're hovering over the response area
-                if let Some(_hover_pos) = response.hover_pos() {
+                if let Some(hover_pos) = response.hover_pos() {
                     if i.modifiers.alt {
                         // Alt + scroll for rotation (clockwise/counter-clockwise)
                         // Positive scroll_delta = scroll up = counter-clockwise rotation
                         // Negative scroll_delta = scroll down = clockwise rotation
                         self.viewport.rotation_angle += scroll_delta * 0.005;
                     } else {
-                        // Regular scroll for zoom
+                        // Regular scroll for zoom - zoom around mouse position
                         let zoom_factor = 1.0 + scroll_delta * 0.001;
-                        self.viewport.zoom = (self.viewport.zoom * zoom_factor).clamp(0.1, 10.0);
+                        let new_zoom = (self.viewport.zoom * zoom_factor).clamp(0.1, 10.0);
+                        
+                        if new_zoom != self.viewport.zoom {
+                            // Get mouse position in screen coordinates relative to render area
+                            let render_rect = response.rect;
+                            let mouse_screen_x = hover_pos.x - render_rect.min.x;
+                            let mouse_screen_y = hover_pos.y - render_rect.min.y;
+                            
+                            // Convert to image coordinates by reversing the current transformation
+                            let render_size = egui::Vec2::new(render_rect.width(), render_rect.height());
+                            
+                            // Convert screen position to NDC [-1, 1]
+                            let mouse_ndc_x = (mouse_screen_x / render_rect.width()) * 2.0 - 1.0;
+                            let mouse_ndc_y = -((mouse_screen_y / render_rect.height()) * 2.0 - 1.0);
+                            
+                            // Convert NDC to image pixels using current transform
+                            let pixels_to_ndc_x = 2.0 / render_size.x;
+                            let pixels_to_ndc_y = 2.0 / render_size.y;
+                            
+                            // Reverse the transformation to get image coordinates
+                            let image_x = (mouse_ndc_x - self.viewport.pan_offset.x) / (self.viewport.zoom * pixels_to_ndc_x);
+                            let image_y = (mouse_ndc_y - self.viewport.pan_offset.y) / (self.viewport.zoom * pixels_to_ndc_y);
+                            
+                            // Apply new zoom
+                            let old_zoom = self.viewport.zoom;
+                            self.viewport.zoom = new_zoom;
+                            
+                            // Calculate new pan offset to keep the same image point under the mouse
+                            let new_ndc_x = image_x * (self.viewport.zoom * pixels_to_ndc_x);
+                            let new_ndc_y = image_y * (self.viewport.zoom * pixels_to_ndc_y);
+                            
+                            self.viewport.pan_offset.x = mouse_ndc_x - new_ndc_x;
+                            self.viewport.pan_offset.y = mouse_ndc_y - new_ndc_y;
+                        }
                     }
                 }
             }
@@ -443,18 +613,15 @@ fn fetch_meta(backend_url: &str) -> Option<MetaResponse> {
             if response.status().is_success() {
                 match response.json::<MetaResponse>() {
                     Ok(meta) => Some(meta),
-                    Err(e) => {
-                        eprintln!("Failed to parse meta response: {}", e);
-                        None
-                    }
+                    Err(_) => None,
                 }
             } else {
                 eprintln!("Meta request failed with status: {}", response.status());
                 None
             }
         }
-        Err(e) => {
-            eprintln!("Failed to fetch meta: {}", e);
+        Err(_) => {
+            eprintln!("Failed to fetch meta");
             None
         }
     }
@@ -467,13 +634,15 @@ fn fetch_tile_data(backend_url: &str, z: u32, x: u32, y: u32) -> Result<Vec<u8>,
             if response.status().is_success() {
                 match response.bytes() {
                     Ok(bytes) => Ok(bytes.to_vec()),
-                    Err(e) => Err(format!("Failed to read tile response: {}", e)),
+                    Err(_) => Err("Failed to read tile response".to_string()),
                 }
             } else {
                 Err(format!("Tile request failed with status: {}", response.status()))
             }
         }
-        Err(e) => Err(format!("Failed to fetch tile: {}", e)),
+        Err(_) => {
+            Err("Failed to fetch tile".to_string())
+        }
     }
 }
 
@@ -547,48 +716,126 @@ impl eframe::App for FitsViewApp {
                 let viewport = self.viewport.clone();
                 let meta = self.meta.clone();
                 let render_rect = rect; // Capture rect for the closure
+                let backend_url_clone = self.backend_url.clone();
+                
+                // Clone data for both closures
+                let viewport_prepare = viewport.clone();
+                let meta_prepare = meta.clone();
+                let viewport_paint = viewport.clone();
+                let meta_paint = meta.clone();
+                
                 let callback_fn = egui_wgpu::CallbackFn::new()
-                    .prepare(move |_device, queue, _encoder, resources| {
-                        let resources: &Custom3dResources = resources.get().unwrap();
+                    .prepare(move |device, queue, _encoder, resources| {
+                        let resources: &mut Custom3dResources = resources.get_mut().unwrap();
                         
-                        // Update uniform buffer with current viewport transform
-                        let (vmin, vmax) = if let Some(ref meta) = meta {
+                        // Calculate render size and image size
+                        let render_size = egui::Vec2::new(render_rect.width(), render_rect.height());
+                        let image_size = if let Some(ref meta) = meta_prepare {
+                            egui::Vec2::new(meta.shape[0] as f32, meta.shape[1] as f32)
+                        } else {
+                            egui::Vec2::new(1024.0, 1024.0) // Default size
+                        };
+                        
+                        // Get visible tiles based on current viewport
+                        let visible_tiles = viewport_prepare.get_visible_tiles(
+                            render_size, 
+                            image_size, 
+                            resources.tile_manager.tile_size
+                        );
+                        
+                        // Ensure all visible tiles are loaded
+                        for tile_coord in &visible_tiles {
+                            resources.tile_manager.get_or_create_tile(
+                                tile_coord.clone(),
+                                device,
+                                queue,
+                                &backend_url_clone,
+                                &resources.texture_bind_group_layout,
+                            );
+                        }
+                        
+                        // Update uniform buffer with base viewport transform
+                        let (vmin, vmax) = if let Some(ref meta) = meta_prepare {
                             (meta.min_val, meta.max_val)
                         } else {
                             (0.0, 255.0)
                         };
                         
-                        // Calculate render size and image size for fixed pixel rendering
-                        let render_size = egui::Vec2::new(render_rect.width(), render_rect.height());
-                        let image_size = if let Some(ref meta) = meta {
-                            egui::Vec2::new(meta.shape[0] as f32, meta.shape[1] as f32)
-                        } else {
-                            egui::Vec2::new(256.0, 256.0) // Default size for test texture
-                        };
-                        
-                        let uniforms = Uniforms {
-                            transform: viewport.to_transform_matrix(render_size, image_size),
-                            vmin,
-                            vmax,
-                            _padding: [0.0, 0.0],
-                        };
-                        
-                        queue.write_buffer(
-                            &resources.uniform_buffer,
-                            0,
-                            bytemuck::cast_slice(&[uniforms]),
+                        // Get visible tiles for uniform buffer preparation
+                        let visible_tiles = viewport_prepare.get_visible_tiles(
+                            render_size, 
+                            image_size, 
+                            resources.tile_manager.tile_size
                         );
+                        
+                        // Create uniform data for each visible tile with proper alignment
+                        let mut tile_index = 0;
+                        for tile_coord in &visible_tiles {
+                            if resources.tile_manager.tiles.contains_key(tile_coord) {
+                                let tile_offset_x = tile_coord.x as f32 * resources.tile_manager.tile_size as f32;
+                                // Flip Y coordinate: in image space, Y=0 is at top, but in graphics Y=0 is at bottom
+                                let max_tiles_y = (image_size.y as u32 + resources.tile_manager.tile_size - 1) / resources.tile_manager.tile_size;
+                                let flipped_y = (max_tiles_y - 1 - tile_coord.y) as f32;
+                                let tile_offset_y = flipped_y * resources.tile_manager.tile_size as f32;
+                                
+                                let tile_uniforms = Uniforms {
+                                    transform: viewport_prepare.to_transform_matrix(render_size, image_size),
+                                    tile_offset: [tile_offset_x, tile_offset_y],
+                                    vmin,
+                                    vmax,
+                                    _padding: [0.0, 0.0],
+                                };
+                                
+                                // Write uniform data at 256-byte aligned offset
+                                let offset = tile_index * 256;
+                                queue.write_buffer(
+                                    &resources.uniform_buffer,
+                                    offset as u64,
+                                    bytemuck::cast_slice(&[tile_uniforms]),
+                                );
+                                
+                                tile_index += 1;
+                            }
+                        }
                         
                         Vec::new()
                     })
-                    .paint(|_info, render_pass, resources| {
+                    .paint(move |_info, render_pass, resources| {
                         let resources: &Custom3dResources = resources.get().unwrap();
                         render_pass.set_pipeline(&resources.pipeline);
-                        render_pass.set_bind_group(0, &resources.diffuse_bind_group, &[]);
-                        render_pass.set_bind_group(1, &resources.uniform_bind_group, &[]);
                         render_pass.set_vertex_buffer(0, resources.vertex_buffer.slice(..));
                         render_pass.set_index_buffer(resources.index_buffer.slice(..), wgpu::IndexFormat::Uint16);
-                        render_pass.draw_indexed(0..resources.num_indices, 0, 0..1);
+                        
+                        // Calculate render and image sizes
+                        let render_size = egui::Vec2::new(render_rect.width(), render_rect.height());
+                        let image_size = if let Some(ref meta) = meta_paint {
+                            egui::Vec2::new(meta.shape[0] as f32, meta.shape[1] as f32)
+                        } else {
+                            egui::Vec2::new(1024.0, 1024.0)
+                        };
+                        
+                        // Get visible tiles
+                        let visible_tiles = viewport_paint.get_visible_tiles(
+                            render_size, 
+                            image_size, 
+                            resources.tile_manager.tile_size
+                        );
+                        
+                        // Render all visible tiles with proper positioning
+                        let mut tile_index = 0;
+                        for tile_coord in &visible_tiles {
+                            if let Some(tile_data) = resources.tile_manager.tiles.get(tile_coord) {
+                                // Calculate properly aligned offset (256-byte alignment required)
+                                let uniform_offset = (tile_index * 256) as u32;
+                                
+                                render_pass.set_bind_group(0, &tile_data.bind_group, &[]);
+                                render_pass.set_bind_group(1, &resources.uniform_bind_group, &[uniform_offset]);
+                                render_pass.draw_indexed(0..resources.num_indices, 0, 0..1);
+                                
+                                tile_index += 1;
+                            }
+                        }
+                        
                     });
                 let callback = egui::PaintCallback {
                     rect,
@@ -598,6 +845,19 @@ impl eframe::App for FitsViewApp {
             }
         });
     }
+}
+
+// Matrix multiplication helper function
+fn multiply_matrices(a: &[[f32; 4]; 4], b: &[[f32; 4]; 4]) -> [[f32; 4]; 4] {
+    let mut result = [[0.0; 4]; 4];
+    for i in 0..4 {
+        for j in 0..4 {
+            for k in 0..4 {
+                result[i][j] += a[i][k] * b[k][j];
+            }
+        }
+    }
+    result
 }
 
 fn main() -> eframe::Result<()> {
