@@ -16,16 +16,22 @@ struct Args {
     /// Backend server URL
     #[arg(long, default_value = "http://127.0.0.1:8001")]
     backend_url: String,
+    
+    /// Initial pan offset X (for testing)
+    #[arg(long, default_value = "0.0")]
+    initial_pan_x: f32,
+    
+    /// Initial pan offset Y (for testing)
+    #[arg(long, default_value = "0.0")]
+    initial_pan_y: f32,
 }
 
-#[derive(Deserialize, Debug, Clone)]
-struct MetaResponse {
-    shape: [u32; 2],
-    dtype: String,
-    tile_size: u32,
-    zoom_levels: u32,
-    min_val: f32,
-    max_val: f32,
+#[derive(Debug, Clone, serde::Deserialize)]
+pub struct MetaResponse {
+    pub shape: [u32; 2],
+    pub tile_size: u32,
+    pub min_val: f32,
+    pub max_val: f32,
 }
 
 #[repr(C)]
@@ -75,18 +81,18 @@ struct Uniforms {
     _padding: [f32; 2], // Align to 16 bytes
 }
 
-#[derive(Clone, Debug)]
-struct Viewport {
-    zoom: f32,
-    pan_offset: egui::Vec2,
-    rotation_angle: f32,
+#[derive(Debug, Clone, Copy)]
+pub struct Viewport {
+    pub zoom: f32,
+    pub pan_offset: egui::Vec2,
+    pub rotation_angle: f32,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
-struct TileCoord {
-    z: u32,
-    x: u32,
-    y: u32,
+pub struct TileCoord {
+    pub z: u32,
+    pub x: u32,
+    pub y: u32,
 }
 
 struct TileData {
@@ -112,11 +118,11 @@ impl Default for Viewport {
 }
 
 impl Viewport {
-    fn reset(&mut self) {
+    pub fn reset(&mut self) {
         *self = Self::default();
     }
     
-    fn fit_to_window(&mut self, window_size: egui::Vec2, image_size: egui::Vec2) {
+    pub fn fit_to_window(&mut self, window_size: egui::Vec2, image_size: egui::Vec2) {
         let scale_x = window_size.x / image_size.x;
         let scale_y = window_size.y / image_size.y;
         self.zoom = scale_x.min(scale_y);
@@ -124,7 +130,7 @@ impl Viewport {
         self.rotation_angle = 0.0;
     }
     
-    fn get_visible_tiles(&self, render_size: egui::Vec2, image_size: egui::Vec2, tile_size: u32) -> Vec<TileCoord> {
+    pub fn get_visible_tiles(&self, render_size: egui::Vec2, image_size: egui::Vec2, tile_size: u32) -> Vec<TileCoord> {
         let mut visible_tiles = Vec::new();
         
         // Calculate the bounds of the visible area in image coordinates
@@ -136,24 +142,28 @@ impl Viewport {
         let visible_half_width = half_render.x * zoom_inv;
         let visible_half_height = half_render.y * zoom_inv;
         
-        // For tile visibility, we need to be more generous and show a larger area
-        // to account for the fact that tiles might be partially visible
-        // Use a larger viewport that encompasses the full render area plus some padding
-        let padding_factor = 1.5; // Show 50% more area to catch edge tiles
-        let expanded_half_width = visible_half_width * padding_factor;
-        let expanded_half_height = visible_half_height * padding_factor;
-        
         // Apply pan offset to determine which part of the image is visible
-        let pan_in_image_x = -self.pan_offset.x * render_size.x * 0.5 * zoom_inv;
-        let pan_in_image_y = self.pan_offset.y * render_size.y * 0.5 * zoom_inv;
+        // Pan offset should be applied directly in image coordinates
+        let pan_in_image_x = -self.pan_offset.x * zoom_inv;
+        let pan_in_image_y = self.pan_offset.y * zoom_inv;
         
         let center_x = image_center.x + pan_in_image_x;
         let center_y = image_center.y + pan_in_image_y;
+        
+        // Use a padding factor to ensure we load tiles that might be partially visible
+        let padding_factor = 1.5;
+        let expanded_half_width = visible_half_width * padding_factor;
+        let expanded_half_height = visible_half_height * padding_factor;
         
         let min_x = (center_x - expanded_half_width).max(0.0);
         let max_x = (center_x + expanded_half_width).min(image_size.x);
         let min_y = (center_y - expanded_half_height).max(0.0);
         let max_y = (center_y + expanded_half_height).min(image_size.y);
+        
+        // Early return if bounds are invalid
+        if min_x >= max_x || min_y >= max_y {
+            return visible_tiles;
+        }
         
         // Convert to tile coordinates
         let tile_size_f = tile_size as f32;
@@ -162,27 +172,23 @@ impl Viewport {
         let min_tile_y = (min_y / tile_size_f).floor() as u32;
         let max_tile_y = (max_y / tile_size_f).ceil() as u32;
         
-        
         // Generate tile coordinates (zoom level 0 for now)
         let max_tiles_x = (image_size.x as u32 + tile_size - 1) / tile_size;
         let max_tiles_y = (image_size.y as u32 + tile_size - 1) / tile_size;
         
-        let mut all_requested = Vec::new();
+        // Generate visible tiles
         for y in min_tile_y..max_tile_y {
             for x in min_tile_x..max_tile_x {
-                all_requested.push((x, y));
                 if x < max_tiles_x && y < max_tiles_y {
                     visible_tiles.push(TileCoord { z: 0, x, y });
                 }
             }
         }
         
-        
-        
         visible_tiles
     }
     
-    fn to_transform_matrix(&self, render_size: egui::Vec2, image_size: egui::Vec2) -> [[f32; 4]; 4] {
+    pub fn to_transform_matrix(&self, render_size: egui::Vec2, image_size: egui::Vec2) -> [[f32; 4]; 4] {
         // Column-major 2D transformation matrix for WGSL
         let cos_r = self.rotation_angle.cos();
         let sin_r = self.rotation_angle.sin();
@@ -496,7 +502,7 @@ impl Default for FitsViewApp {
 }
 
 impl FitsViewApp {
-    fn new(cc: &eframe::CreationContext<'_>, backend_url: String) -> Self {
+    fn new(cc: &eframe::CreationContext<'_>, backend_url: String, initial_pan: Option<egui::Vec2>) -> Self {
         let meta = fetch_meta(&backend_url);
         let renderer = {
             let wgpu_render_state = cc.wgpu_render_state.as_ref().expect("wgpu backend");
@@ -510,6 +516,18 @@ impl FitsViewApp {
             let window_size = egui::Vec2::new(800.0, 600.0);
             let image_size = egui::Vec2::new(meta.shape[0] as f32, meta.shape[1] as f32);
             viewport.fit_to_window(window_size, image_size);
+            
+            // Apply initial pan offset if provided (for testing)
+            if let Some(pan) = initial_pan {
+                viewport.pan_offset = pan;
+                println!("🎯 Applied initial pan offset: {:?}", pan);
+            }
+            
+            println!("🎯 Initial viewport setup:");
+            println!("   Window size: {:?}", window_size);
+            println!("   Image size: {:?}", image_size);
+            println!("   Initial zoom: {:.3}", viewport.zoom);
+            println!("   Initial pan: {:?}", viewport.pan_offset);
         }
         
         Self { meta, renderer, backend_url, viewport }
@@ -695,7 +713,7 @@ impl eframe::App for FitsViewApp {
             ui.heading("FITS View");
             if let Some(meta) = &self.meta {
                 ui.label(format!("Shape: {}x{}", meta.shape[0], meta.shape[1]));
-                ui.label(format!("Data Type: {}", meta.dtype));
+                ui.label(format!("Data Type: {}", "float32"));
             } else {
                 ui.label("Failed to fetch metadata. Is the server running?");
             }
@@ -742,6 +760,12 @@ impl eframe::App for FitsViewApp {
                             image_size, 
                             resources.tile_manager.tile_size
                         );
+                        
+                        // Debug output for tile visibility
+                        if visible_tiles.len() != resources.tile_manager.tiles.len() {
+                            println!("🔍 Visible tiles: {} (loaded: {})", visible_tiles.len(), resources.tile_manager.tiles.len());
+                            println!("   Viewport: zoom={:.3}, pan={:?}", viewport_prepare.zoom, viewport_prepare.pan_offset);
+                        }
                         
                         // Ensure all visible tiles are loaded
                         for tile_coord in &visible_tiles {
@@ -863,13 +887,14 @@ fn multiply_matrices(a: &[[f32; 4]; 4], b: &[[f32; 4]; 4]) -> [[f32; 4]; 4] {
 fn main() -> eframe::Result<()> {
     let args = Args::parse();
     let backend_url = args.backend_url.clone();
+    let initial_pan = egui::Vec2::new(args.initial_pan_x, args.initial_pan_y);
     
     let mut native_options = eframe::NativeOptions::default();
     native_options.renderer = eframe::Renderer::Wgpu;
     eframe::run_native(
         "FITS View",
         native_options,
-        Box::new(move |cc| Box::new(FitsViewApp::new(cc, backend_url))),
+        Box::new(move |cc| Box::new(FitsViewApp::new(cc, backend_url, Some(initial_pan)))),
     )
 }
 
@@ -922,6 +947,19 @@ mod tests {
         
         let render_size = egui::Vec2::new(800.0, 600.0);
         let image_size = egui::Vec2::new(400.0, 300.0);
+        let visible_tiles = viewport.get_visible_tiles(render_size, image_size, 256);
+        
+        // Debug output for tile visibility
+        if visible_tiles.len() != 4 {
+            println!("🔍 Visible tiles: {} (loaded: 4)", visible_tiles.len());
+            println!("   Viewport: zoom={:.3}, pan={:?}", viewport.zoom, viewport.pan_offset);
+        }
+        
+        // Load tiles that aren't already loaded
+        for tile_coord in &visible_tiles {
+            // Do nothing
+        }
+        
         let matrix = viewport.to_transform_matrix(render_size, image_size);
         
         // With 2x zoom, scaling should be doubled

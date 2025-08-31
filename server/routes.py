@@ -3,7 +3,7 @@ from fastapi import APIRouter, HTTPException
 from fastapi.responses import StreamingResponse
 import numpy as np
 from pydantic import BaseModel
-from .header import RawTileHeader, RAW_HEADER_SIZE, DT_F32, ENDIAN_LITTLE
+from header import RawTileHeader, RAW_HEADER_SIZE, DT_F32, ENDIAN_LITTLE
 
 router = APIRouter()
 
