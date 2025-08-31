@@ -2,10 +2,19 @@ mod raw_header;
 mod parse;
 mod upload;
 
+use clap::Parser;
 use eframe::egui;
 use serde::Deserialize;
 use std::sync::Arc;
 use wgpu::util::DeviceExt;
+
+#[derive(Parser)]
+#[command(author, version, about, long_about = None)]
+struct Args {
+    /// Backend server URL
+    #[arg(long, default_value = "http://127.0.0.1:8000")]
+    backend_url: String,
+}
 
 #[derive(Deserialize, Debug, Clone)]
 struct MetaResponse {
@@ -55,13 +64,15 @@ const VERTICES: &[Vertex] = &[
 const INDICES: &[u16] = &[0, 1, 2, 0, 2, 3];
 
 
-struct Custom3d {
+struct Custom3dResources {
     pipeline: wgpu::RenderPipeline,
     vertex_buffer: wgpu::Buffer,
     index_buffer: wgpu::Buffer,
     num_indices: u32,
     diffuse_bind_group: wgpu::BindGroup,
 }
+
+struct Custom3d;
 
 impl Custom3d {
     fn new(wgpu_render_state: &egui_wgpu::RenderState) -> Self {
@@ -214,27 +225,28 @@ impl Custom3d {
         });
         let num_indices = INDICES.len() as u32;
 
-        Self {
-            pipeline,
-            vertex_buffer,
-            index_buffer,
-            num_indices,
-            diffuse_bind_group,
-        }
-    }
+        // Store resources in the renderer's callback resources
+        wgpu_render_state
+            .renderer
+            .write()
+            .paint_callback_resources
+            .insert(Custom3dResources {
+                pipeline,
+                vertex_buffer,
+                index_buffer,
+                num_indices,
+                diffuse_bind_group,
+            });
 
-    fn render<'rp>(&'rp self, render_pass: &mut wgpu::RenderPass<'rp>) {
-        render_pass.set_pipeline(&self.pipeline);
-        render_pass.set_bind_group(0, &self.diffuse_bind_group, &[]);
-        render_pass.set_vertex_buffer(0, self.vertex_buffer.slice(..));
-        render_pass.set_index_buffer(self.index_buffer.slice(..), wgpu::IndexFormat::Uint16);
-        render_pass.draw_indexed(0..self.num_indices, 0, 0..1);
+        Self
     }
 }
 
+
 struct FitsViewApp {
     meta: Option<MetaResponse>,
-    renderer: Option<Arc<Custom3d>>,
+    renderer: Option<Custom3d>,
+    backend_url: String,
 }
 
 impl Default for FitsViewApp {
@@ -242,23 +254,24 @@ impl Default for FitsViewApp {
         Self {
             meta: None,
             renderer: None,
+            backend_url: "http://127.0.0.1:8000".to_string(),
         }
     }
 }
 
 impl FitsViewApp {
-    fn new(cc: &eframe::CreationContext<'_>) -> Self {
-        let meta = fetch_meta();
+    fn new(cc: &eframe::CreationContext<'_>, backend_url: String) -> Self {
+        let meta = fetch_meta(&backend_url);
         let renderer = {
             let wgpu_render_state = cc.wgpu_render_state.as_ref().expect("wgpu backend");
-            Some(Arc::new(Custom3d::new(wgpu_render_state)))
+            Some(Custom3d::new(wgpu_render_state))
         };
-        Self { meta, renderer }
+        Self { meta, renderer, backend_url }
     }
 }
 
-fn fetch_meta() -> Option<MetaResponse> {
-    let url = "http://127.0.0.1:8000/meta";
+fn fetch_meta(backend_url: &str) -> Option<MetaResponse> {
+    let url = format!("{}/meta", backend_url);
     match reqwest::blocking::get(url) {
         Ok(response) => {
             if response.status().is_success() {
@@ -293,15 +306,22 @@ impl eframe::App for FitsViewApp {
             }
             ui.separator();
             let (rect, _response) = ui.allocate_exact_size(ui.available_size(), egui::Sense::drag());
-            if let Some(renderer) = &self.renderer {
-                let renderer = renderer.clone();
+            if let Some(_renderer) = &self.renderer {
+                let callback_fn = egui_wgpu::CallbackFn::new()
+                    .prepare(|_device, _queue, _encoder, _resources| {
+                        Vec::new()
+                    })
+                    .paint(|_info, render_pass, resources| {
+                        let resources: &Custom3dResources = resources.get().unwrap();
+                        render_pass.set_pipeline(&resources.pipeline);
+                        render_pass.set_bind_group(0, &resources.diffuse_bind_group, &[]);
+                        render_pass.set_vertex_buffer(0, resources.vertex_buffer.slice(..));
+                        render_pass.set_index_buffer(resources.index_buffer.slice(..), wgpu::IndexFormat::Uint16);
+                        render_pass.draw_indexed(0..resources.num_indices, 0, 0..1);
+                    });
                 let callback = egui::PaintCallback {
                     rect,
-                    callback: Arc::new(egui_wgpu::CallbackFn::new().paint(
-                        move |_info, render_pass, _resources| {
-                            renderer.render(render_pass);
-                        },
-                    )),
+                    callback: Arc::new(callback_fn),
                 };
                 ui.painter().add(callback);
             }
@@ -310,11 +330,14 @@ impl eframe::App for FitsViewApp {
 }
 
 fn main() -> eframe::Result<()> {
+    let args = Args::parse();
+    let backend_url = args.backend_url.clone();
+    
     let mut native_options = eframe::NativeOptions::default();
     native_options.renderer = eframe::Renderer::Wgpu;
     eframe::run_native(
         "FITS View",
         native_options,
-        Box::new(|cc| Box::new(FitsViewApp::new(cc))),
+        Box::new(move |cc| Box::new(FitsViewApp::new(cc, backend_url))),
     )
 }
