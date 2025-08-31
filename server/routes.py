@@ -38,7 +38,30 @@ def get_tile_numpy(z: int, x: int, y: int) -> np.ndarray:
     # In a real implementation, this would slice a FITS file with downsampling
     # For now, we just slice the global array
     # Note: z is not used yet
-    return IMAGE_DATA[y*TILE_SIZE:(y+1)*TILE_SIZE, x*TILE_SIZE:(x+1)*TILE_SIZE]
+    
+    # Validate tile coordinates are within image bounds
+    h, w = IMAGE_DATA.shape
+    max_x = (w - 1) // TILE_SIZE  # Maximum valid x coordinate
+    max_y = (h - 1) // TILE_SIZE  # Maximum valid y coordinate
+    
+    if x < 0 or y < 0 or x > max_x or y > max_y:
+        raise IndexError(f"Tile ({x},{y}) is out of bounds. Valid range: (0-{max_x}, 0-{max_y})")
+    
+    # Calculate slice bounds
+    y_start = y * TILE_SIZE
+    y_end = min((y + 1) * TILE_SIZE, h)
+    x_start = x * TILE_SIZE  
+    x_end = min((x + 1) * TILE_SIZE, w)
+    
+    tile_data = IMAGE_DATA[y_start:y_end, x_start:x_end]
+    
+    # Pad tile to full TILE_SIZE if it's at the edge
+    if tile_data.shape != (TILE_SIZE, TILE_SIZE):
+        padded_tile = np.zeros((TILE_SIZE, TILE_SIZE), dtype=IMAGE_DATA.dtype)
+        padded_tile[:tile_data.shape[0], :tile_data.shape[1]] = tile_data
+        return padded_tile
+    
+    return tile_data
 
 @router.get("/tile/{z}/{x}/{y}")
 def get_tile(z: int, x: int, y: int, format: str = "raw", dtype: str = "float32"):
