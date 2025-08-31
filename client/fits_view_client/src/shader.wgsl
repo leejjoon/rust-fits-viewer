@@ -27,7 +27,23 @@ var t_diffuse: texture_2d<f32>;
 @group(0) @binding(1)
 var s_diffuse: sampler;
 
+struct Uniforms {
+    vmin: f32,
+    vmax: f32,
+};
+
+@group(1) @binding(0)
+var<uniform> uniforms: Uniforms;
+
 @fragment
 fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
-    return textureSample(t_diffuse, s_diffuse, in.tex_coords);
+    let sample = textureSampleLevel(t_diffuse, s_diffuse, in.tex_coords, 0.0);
+    // For R32Float textures, the value is in the red channel
+    let raw_value = sample.r;
+    
+    // Normalize the value from [vmin, vmax] to [0, 1]
+    let normalized = (raw_value - uniforms.vmin) / (uniforms.vmax - uniforms.vmin);
+    let intensity = clamp(normalized, 0.0, 1.0);
+    
+    return vec4<f32>(intensity, intensity, intensity, 1.0);
 }

@@ -7,12 +7,14 @@ use eframe::egui;
 use serde::Deserialize;
 use std::sync::Arc;
 use wgpu::util::DeviceExt;
+use crate::parse::parse_raw_tile;
+use crate::upload::upload_r32float_texture;
 
 #[derive(Parser)]
 #[command(author, version, about, long_about = None)]
 struct Args {
     /// Backend server URL
-    #[arg(long, default_value = "http://127.0.0.1:8000")]
+    #[arg(long, default_value = "http://127.0.0.1:8001")]
     backend_url: String,
 }
 
@@ -63,6 +65,14 @@ const VERTICES: &[Vertex] = &[
 
 const INDICES: &[u16] = &[0, 1, 2, 0, 2, 3];
 
+#[repr(C)]
+#[derive(Copy, Clone, Debug, bytemuck::Pod, bytemuck::Zeroable)]
+struct Uniforms {
+    vmin: f32,
+    vmax: f32,
+    _padding: [f32; 2], // Align to 16 bytes
+}
+
 
 struct Custom3dResources {
     pipeline: wgpu::RenderPipeline,
@@ -70,61 +80,55 @@ struct Custom3dResources {
     index_buffer: wgpu::Buffer,
     num_indices: u32,
     diffuse_bind_group: wgpu::BindGroup,
+    uniform_bind_group: wgpu::BindGroup,
 }
 
-struct Custom3d;
+struct Custom3d {
+    backend_url: String,
+}
 
 impl Custom3d {
-    fn new(wgpu_render_state: &egui_wgpu::RenderState) -> Self {
+    fn new(wgpu_render_state: &egui_wgpu::RenderState, backend_url: String, meta: Option<&MetaResponse>) -> Self {
         let device = &wgpu_render_state.device;
         let queue = &wgpu_render_state.queue;
 
-        // Create test texture
-        let texture_size = wgpu::Extent3d { width: 8, height: 8, depth_or_array_layers: 1 };
-        let diffuse_texture = device.create_texture(&wgpu::TextureDescriptor {
-            size: texture_size,
-            mip_level_count: 1,
-            sample_count: 1,
-            dimension: wgpu::TextureDimension::D2,
-            format: wgpu::TextureFormat::Rgba8UnormSrgb,
-            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
-            label: Some("diffuse_texture"),
-            view_formats: &[],
-        });
-
-        let checkerboard = {
-            let mut data = Vec::with_capacity((texture_size.width * texture_size.height) as usize * 4);
-            for i in 0..texture_size.width {
-                for j in 0..texture_size.height {
-                    let is_white = (i + j) % 2 == 0;
-                    data.extend_from_slice(if is_white { &[255, 255, 255, 255] } else { &[0, 0, 0, 255] });
-                }
-            }
-            data
+        // Get normalization values from metadata
+        let (vmin, vmax) = if let Some(meta) = meta {
+            (meta.min_val, meta.max_val)
+        } else {
+            (0.0, 255.0) // Default fallback values
         };
 
-        queue.write_texture(
-            wgpu::ImageCopyTexture {
-                texture: &diffuse_texture,
-                mip_level: 0,
-                origin: wgpu::Origin3d::ZERO,
-                aspect: wgpu::TextureAspect::All,
-            },
-            &checkerboard,
-            wgpu::ImageDataLayout {
-                offset: 0,
-                bytes_per_row: Some(4 * texture_size.width),
-                rows_per_image: Some(texture_size.height),
-            },
-            texture_size,
-        );
+        println!("Using normalization: vmin={}, vmax={}", vmin, vmax);
+
+        // Fetch and create FITS tile texture
+        let diffuse_texture = match fetch_tile_data(&backend_url, 0, 0, 0) {
+            Ok(tile_bytes) => {
+                match parse_raw_tile(&tile_bytes) {
+                    Ok(tile) => {
+                        println!("Successfully parsed tile: {}x{}", tile.header.width, tile.header.height);
+                        upload_r32float_texture(device, queue, &tile)
+                    }
+                    Err(e) => {
+                        eprintln!("Failed to parse tile: {}", e);
+                        // Fallback to test texture
+                        create_test_texture(device, queue)
+                    }
+                }
+            }
+            Err(e) => {
+                eprintln!("Failed to fetch tile: {}", e);
+                // Fallback to test texture
+                create_test_texture(device, queue)
+            }
+        };
 
         let diffuse_texture_view = diffuse_texture.create_view(&wgpu::TextureViewDescriptor::default());
         let diffuse_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
             address_mode_u: wgpu::AddressMode::ClampToEdge,
             address_mode_v: wgpu::AddressMode::ClampToEdge,
             address_mode_w: wgpu::AddressMode::ClampToEdge,
-            mag_filter: wgpu::FilterMode::Linear,
+            mag_filter: wgpu::FilterMode::Nearest,
             min_filter: wgpu::FilterMode::Nearest,
             mipmap_filter: wgpu::FilterMode::Nearest,
             ..Default::default()
@@ -138,18 +142,34 @@ impl Custom3d {
                     ty: wgpu::BindingType::Texture {
                         multisampled: false,
                         view_dimension: wgpu::TextureViewDimension::D2,
-                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        sample_type: wgpu::TextureSampleType::Float { filterable: false },
                     },
                     count: None,
                 },
                 wgpu::BindGroupLayoutEntry {
                     binding: 1,
                     visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::NonFiltering),
                     count: None,
                 },
             ],
             label: Some("texture_bind_group_layout"),
+        });
+
+        let uniform_bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+            ],
+            label: Some("uniform_bind_group_layout"),
         });
 
         let diffuse_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -167,6 +187,23 @@ impl Custom3d {
             label: Some("diffuse_bind_group"),
         });
 
+        let uniform_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("Uniform Buffer"),
+            contents: bytemuck::cast_slice(&[Uniforms { vmin, vmax, _padding: [0.0, 0.0] }]),
+            usage: wgpu::BufferUsages::UNIFORM,
+        });
+
+        let uniform_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            layout: &uniform_bind_group_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: uniform_buffer.as_entire_binding(),
+                },
+            ],
+            label: Some("uniform_bind_group"),
+        });
+
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("Shader"),
             source: wgpu::ShaderSource::Wgsl(include_str!("shader.wgsl").into()),
@@ -174,7 +211,7 @@ impl Custom3d {
 
         let render_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("Render Pipeline Layout"),
-            bind_group_layouts: &[&texture_bind_group_layout],
+            bind_group_layouts: &[&texture_bind_group_layout, &uniform_bind_group_layout],
             push_constant_ranges: &[],
         });
 
@@ -236,9 +273,10 @@ impl Custom3d {
                 index_buffer,
                 num_indices,
                 diffuse_bind_group,
+                uniform_bind_group,
             });
 
-        Self
+        Self { backend_url }
     }
 }
 
@@ -254,7 +292,7 @@ impl Default for FitsViewApp {
         Self {
             meta: None,
             renderer: None,
-            backend_url: "http://127.0.0.1:8000".to_string(),
+            backend_url: "http://127.0.0.1:8001".to_string(),
         }
     }
 }
@@ -264,7 +302,7 @@ impl FitsViewApp {
         let meta = fetch_meta(&backend_url);
         let renderer = {
             let wgpu_render_state = cc.wgpu_render_state.as_ref().expect("wgpu backend");
-            Some(Custom3d::new(wgpu_render_state))
+            Some(Custom3d::new(wgpu_render_state, backend_url.clone(), meta.as_ref()))
         };
         Self { meta, renderer, backend_url }
     }
@@ -294,6 +332,66 @@ fn fetch_meta(backend_url: &str) -> Option<MetaResponse> {
     }
 }
 
+fn fetch_tile_data(backend_url: &str, z: u32, x: u32, y: u32) -> Result<Vec<u8>, String> {
+    let url = format!("{}/tile/{}/{}/{}?format=raw&dtype=float32", backend_url, z, x, y);
+    match reqwest::blocking::get(&url) {
+        Ok(response) => {
+            if response.status().is_success() {
+                match response.bytes() {
+                    Ok(bytes) => Ok(bytes.to_vec()),
+                    Err(e) => Err(format!("Failed to read tile response: {}", e)),
+                }
+            } else {
+                Err(format!("Tile request failed with status: {}", response.status()))
+            }
+        }
+        Err(e) => Err(format!("Failed to fetch tile: {}", e)),
+    }
+}
+
+fn create_test_texture(device: &wgpu::Device, queue: &wgpu::Queue) -> wgpu::Texture {
+    let texture_size = wgpu::Extent3d { width: 8, height: 8, depth_or_array_layers: 1 };
+    let texture = device.create_texture(&wgpu::TextureDescriptor {
+        size: texture_size,
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: wgpu::TextureFormat::Rgba8UnormSrgb,
+        usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+        label: Some("test_texture"),
+        view_formats: &[],
+    });
+
+    let checkerboard = {
+        let mut data = Vec::with_capacity((texture_size.width * texture_size.height) as usize * 4);
+        for i in 0..texture_size.width {
+            for j in 0..texture_size.height {
+                let is_white = (i + j) % 2 == 0;
+                data.extend_from_slice(if is_white { &[255, 255, 255, 255] } else { &[0, 0, 0, 255] });
+            }
+        }
+        data
+    };
+
+    queue.write_texture(
+        wgpu::ImageCopyTexture {
+            texture: &texture,
+            mip_level: 0,
+            origin: wgpu::Origin3d::ZERO,
+            aspect: wgpu::TextureAspect::All,
+        },
+        &checkerboard,
+        wgpu::ImageDataLayout {
+            offset: 0,
+            bytes_per_row: Some(4 * texture_size.width),
+            rows_per_image: Some(texture_size.height),
+        },
+        texture_size,
+    );
+
+    texture
+}
+
 impl eframe::App for FitsViewApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         egui::CentralPanel::default().show(ctx, |ui| {
@@ -315,6 +413,7 @@ impl eframe::App for FitsViewApp {
                         let resources: &Custom3dResources = resources.get().unwrap();
                         render_pass.set_pipeline(&resources.pipeline);
                         render_pass.set_bind_group(0, &resources.diffuse_bind_group, &[]);
+                        render_pass.set_bind_group(1, &resources.uniform_bind_group, &[]);
                         render_pass.set_vertex_buffer(0, resources.vertex_buffer.slice(..));
                         render_pass.set_index_buffer(resources.index_buffer.slice(..), wgpu::IndexFormat::Uint16);
                         render_pass.draw_indexed(0..resources.num_indices, 0, 0..1);
