@@ -68,9 +68,52 @@ const INDICES: &[u16] = &[0, 1, 2, 0, 2, 3];
 #[repr(C)]
 #[derive(Copy, Clone, Debug, bytemuck::Pod, bytemuck::Zeroable)]
 struct Uniforms {
+    transform: [[f32; 4]; 4], // 4x4 transformation matrix
     vmin: f32,
     vmax: f32,
     _padding: [f32; 2], // Align to 16 bytes
+}
+
+#[derive(Clone, Debug)]
+struct Viewport {
+    zoom: f32,
+    pan_offset: egui::Vec2,
+    rotation_angle: f32,
+}
+
+impl Default for Viewport {
+    fn default() -> Self {
+        Self {
+            zoom: 1.0,
+            pan_offset: egui::Vec2::ZERO,
+            rotation_angle: 0.0,
+        }
+    }
+}
+
+impl Viewport {
+    fn reset(&mut self) {
+        *self = Self::default();
+    }
+    
+    fn fit_to_window(&mut self, window_size: egui::Vec2, image_size: egui::Vec2) {
+        let scale_x = window_size.x / image_size.x;
+        let scale_y = window_size.y / image_size.y;
+        self.zoom = scale_x.min(scale_y);
+        self.pan_offset = egui::Vec2::ZERO;
+        self.rotation_angle = 0.0;
+    }
+    
+    fn to_transform_matrix(&self) -> [[f32; 4]; 4] {
+        // Simple 2D transformation: just scale and translate
+        // Rotation is disabled to fix the 3D spinning issue
+        [
+            [self.zoom, 0.0, 0.0, self.pan_offset.x],
+            [0.0, self.zoom, 0.0, self.pan_offset.y],
+            [0.0, 0.0, 1.0, 0.0],
+            [0.0, 0.0, 0.0, 1.0],
+        ]
+    }
 }
 
 
@@ -81,6 +124,7 @@ struct Custom3dResources {
     num_indices: u32,
     diffuse_bind_group: wgpu::BindGroup,
     uniform_bind_group: wgpu::BindGroup,
+    uniform_buffer: wgpu::Buffer,
 }
 
 struct Custom3d {
@@ -160,7 +204,7 @@ impl Custom3d {
             entries: &[
                 wgpu::BindGroupLayoutEntry {
                     binding: 0,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    visibility: wgpu::ShaderStages::VERTEX | wgpu::ShaderStages::FRAGMENT,
                     ty: wgpu::BindingType::Buffer {
                         ty: wgpu::BufferBindingType::Uniform,
                         has_dynamic_offset: false,
@@ -187,10 +231,22 @@ impl Custom3d {
             label: Some("diffuse_bind_group"),
         });
 
+        let identity_matrix = [
+            [1.0, 0.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0, 0.0],
+            [0.0, 0.0, 1.0, 0.0],
+            [0.0, 0.0, 0.0, 1.0],
+        ];
+        
         let uniform_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("Uniform Buffer"),
-            contents: bytemuck::cast_slice(&[Uniforms { vmin, vmax, _padding: [0.0, 0.0] }]),
-            usage: wgpu::BufferUsages::UNIFORM,
+            contents: bytemuck::cast_slice(&[Uniforms { 
+                transform: identity_matrix,
+                vmin, 
+                vmax, 
+                _padding: [0.0, 0.0] 
+            }]),
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
         });
 
         let uniform_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -274,6 +330,7 @@ impl Custom3d {
                 num_indices,
                 diffuse_bind_group,
                 uniform_bind_group,
+                uniform_buffer,
             });
 
         Self { backend_url }
@@ -285,6 +342,7 @@ struct FitsViewApp {
     meta: Option<MetaResponse>,
     renderer: Option<Custom3d>,
     backend_url: String,
+    viewport: Viewport,
 }
 
 impl Default for FitsViewApp {
@@ -293,6 +351,7 @@ impl Default for FitsViewApp {
             meta: None,
             renderer: None,
             backend_url: "http://127.0.0.1:8001".to_string(),
+            viewport: Viewport::default(),
         }
     }
 }
@@ -304,7 +363,46 @@ impl FitsViewApp {
             let wgpu_render_state = cc.wgpu_render_state.as_ref().expect("wgpu backend");
             Some(Custom3d::new(wgpu_render_state, backend_url.clone(), meta.as_ref()))
         };
-        Self { meta, renderer, backend_url }
+        Self { meta, renderer, backend_url, viewport: Viewport::default() }
+    }
+    
+    fn handle_input(&mut self, response: &egui::Response, ctx: &egui::Context, frame: &mut eframe::Frame) {
+        // Mouse drag for panning
+        if response.dragged() {
+            self.viewport.pan_offset += response.drag_delta() * 0.002; // Scale factor for sensitivity
+        }
+        
+        // Mouse scroll for zooming
+        if let Some(_hover_pos) = response.hover_pos() {
+            let scroll_delta = ctx.input(|i| i.scroll_delta.y);
+            if scroll_delta != 0.0 {
+                if ctx.input(|i| i.modifiers.ctrl) {
+                    // Ctrl + scroll for rotation
+                    self.viewport.rotation_angle += scroll_delta * 0.01;
+                } else {
+                    // Regular scroll for zoom
+                    let zoom_factor = 1.0 + scroll_delta * 0.001;
+                    self.viewport.zoom = (self.viewport.zoom * zoom_factor).clamp(0.1, 10.0);
+                }
+            }
+        }
+        
+        // Keyboard shortcuts
+        ctx.input(|i| {
+            if i.key_pressed(egui::Key::R) {
+                self.viewport.reset();
+            }
+            if i.key_pressed(egui::Key::F) {
+                if let Some(meta) = &self.meta {
+                    let window_size = egui::Vec2::new(800.0, 600.0); // Default size
+                    let image_size = egui::Vec2::new(meta.shape[0] as f32, meta.shape[1] as f32);
+                    self.viewport.fit_to_window(window_size, image_size);
+                }
+            }
+            if i.key_pressed(egui::Key::Q) {
+                frame.close();
+            }
+        });
     }
 }
 
@@ -393,7 +491,7 @@ fn create_test_texture(device: &wgpu::Device, queue: &wgpu::Queue) -> wgpu::Text
 }
 
 impl eframe::App for FitsViewApp {
-    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+    fn update(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
         egui::CentralPanel::default().show(ctx, |ui| {
             ui.heading("FITS View");
             if let Some(meta) = &self.meta {
@@ -402,11 +500,46 @@ impl eframe::App for FitsViewApp {
             } else {
                 ui.label("Failed to fetch metadata. Is the server running?");
             }
+            
+            // Display viewport info
+            ui.label(format!("Zoom: {:.2}x, Pan: ({:.1}, {:.1}), Rotation: {:.1}°", 
+                self.viewport.zoom, 
+                self.viewport.pan_offset.x, 
+                self.viewport.pan_offset.y, 
+                self.viewport.rotation_angle.to_degrees()));
+            
             ui.separator();
-            let (rect, _response) = ui.allocate_exact_size(ui.available_size(), egui::Sense::drag());
+            let (rect, response) = ui.allocate_exact_size(ui.available_size(), egui::Sense::click_and_drag());
+            
+            // Handle input
+            self.handle_input(&response, ctx, frame);
             if let Some(_renderer) = &self.renderer {
+                let viewport = self.viewport.clone();
+                let meta = self.meta.clone();
                 let callback_fn = egui_wgpu::CallbackFn::new()
-                    .prepare(|_device, _queue, _encoder, _resources| {
+                    .prepare(move |_device, queue, _encoder, resources| {
+                        let resources: &Custom3dResources = resources.get().unwrap();
+                        
+                        // Update uniform buffer with current viewport transform
+                        let (vmin, vmax) = if let Some(ref meta) = meta {
+                            (meta.min_val, meta.max_val)
+                        } else {
+                            (0.0, 255.0)
+                        };
+                        
+                        let uniforms = Uniforms {
+                            transform: viewport.to_transform_matrix(),
+                            vmin,
+                            vmax,
+                            _padding: [0.0, 0.0],
+                        };
+                        
+                        queue.write_buffer(
+                            &resources.uniform_buffer,
+                            0,
+                            bytemuck::cast_slice(&[uniforms]),
+                        );
+                        
                         Vec::new()
                     })
                     .paint(|_info, render_pass, resources| {
@@ -439,4 +572,94 @@ fn main() -> eframe::Result<()> {
         native_options,
         Box::new(move |cc| Box::new(FitsViewApp::new(cc, backend_url))),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_viewport_default() {
+        let viewport = Viewport::default();
+        assert_eq!(viewport.zoom, 1.0);
+        assert_eq!(viewport.pan_offset, egui::Vec2::ZERO);
+        assert_eq!(viewport.rotation_angle, 0.0);
+    }
+
+    #[test]
+    fn test_identity_transformation() {
+        let viewport = Viewport::default();
+        let matrix = viewport.to_transform_matrix();
+        
+        // Identity matrix should be:
+        // [1, 0, 0, 0]
+        // [0, 1, 0, 0]
+        // [0, 0, 1, 0]
+        // [0, 0, 0, 1]
+        assert_eq!(matrix[0], [1.0, 0.0, 0.0, 0.0]);
+        assert_eq!(matrix[1], [0.0, 1.0, 0.0, 0.0]);
+        assert_eq!(matrix[2], [0.0, 0.0, 1.0, 0.0]);
+        assert_eq!(matrix[3], [0.0, 0.0, 0.0, 1.0]);
+    }
+
+    #[test]
+    fn test_pure_translation() {
+        let mut viewport = Viewport::default();
+        viewport.pan_offset = egui::Vec2::new(5.0, 10.0);
+        
+        let matrix = viewport.to_transform_matrix();
+        
+        // Translation should only affect the translation column
+        assert_eq!(matrix[0], [1.0, 0.0, 0.0, 5.0]);
+        assert_eq!(matrix[1], [0.0, 1.0, 0.0, 10.0]);
+        assert_eq!(matrix[2], [0.0, 0.0, 1.0, 0.0]);
+        assert_eq!(matrix[3], [0.0, 0.0, 0.0, 1.0]);
+    }
+
+    #[test]
+    fn test_pure_scaling() {
+        let mut viewport = Viewport::default();
+        viewport.zoom = 2.0;
+        
+        let matrix = viewport.to_transform_matrix();
+        
+        // Scaling should only affect diagonal elements
+        assert_eq!(matrix[0], [2.0, 0.0, 0.0, 0.0]);
+        assert_eq!(matrix[1], [0.0, 2.0, 0.0, 0.0]);
+        assert_eq!(matrix[2], [0.0, 0.0, 1.0, 0.0]);
+        assert_eq!(matrix[3], [0.0, 0.0, 0.0, 1.0]);
+    }
+
+    #[test]
+    fn test_no_rotation_components() {
+        let mut viewport = Viewport::default();
+        viewport.rotation_angle = 45.0; // This should NOT affect the matrix
+        viewport.zoom = 2.0;
+        viewport.pan_offset = egui::Vec2::new(1.0, 1.0);
+        
+        let matrix = viewport.to_transform_matrix();
+        
+        // Off-diagonal elements should be zero (no rotation)
+        assert_eq!(matrix[0][1], 0.0); // No Y component in X transformation
+        assert_eq!(matrix[1][0], 0.0); // No X component in Y transformation
+        
+        // Should be pure scale + translate
+        assert_eq!(matrix[0], [2.0, 0.0, 0.0, 1.0]);
+        assert_eq!(matrix[1], [0.0, 2.0, 0.0, 1.0]);
+    }
+
+    #[test]
+    fn test_matrix_determinant() {
+        let mut viewport = Viewport::default();
+        viewport.zoom = 2.0;
+        
+        let matrix = viewport.to_transform_matrix();
+        
+        // For a 2D transformation matrix [a b tx; c d ty; 0 0 1],
+        // determinant = a*d - b*c
+        let det = matrix[0][0] * matrix[1][1] - matrix[0][1] * matrix[1][0];
+        
+        // Determinant should equal zoom^2 for pure scaling
+        assert_eq!(det, 4.0);
+    }
 }

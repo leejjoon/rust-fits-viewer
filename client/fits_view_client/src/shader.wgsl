@@ -10,13 +10,26 @@ struct VertexOutput {
     @location(0) tex_coords: vec2<f32>,
 };
 
+struct Uniforms {
+    transform: mat4x4<f32>,
+    vmin: f32,
+    vmax: f32,
+};
+
+@group(1) @binding(0)
+var<uniform> uniforms: Uniforms;
+
 @vertex
 fn vs_main(
     model: VertexInput,
 ) -> VertexOutput {
     var out: VertexOutput;
     out.tex_coords = model.tex_coords;
-    out.clip_position = vec4<f32>(model.position, 0.0, 1.0);
+    
+    // Apply transformation matrix for pan, zoom, rotation
+    let transformed_pos = uniforms.transform * vec4<f32>(model.position, 0.0, 1.0);
+    out.clip_position = transformed_pos;
+    
     return out;
 }
 
@@ -26,14 +39,6 @@ fn vs_main(
 var t_diffuse: texture_2d<f32>;
 @group(0) @binding(1)
 var s_diffuse: sampler;
-
-struct Uniforms {
-    vmin: f32,
-    vmax: f32,
-};
-
-@group(1) @binding(0)
-var<uniform> uniforms: Uniforms;
 
 @fragment
 fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
