@@ -105,13 +105,21 @@ impl Viewport {
     }
     
     fn to_transform_matrix(&self) -> [[f32; 4]; 4] {
-        // Simple 2D transformation: just scale and translate
-        // Rotation is disabled to fix the 3D spinning issue
+        // Column-major 2D transformation matrix for WGSL
+        // WGSL expects column-major matrices, so we need to transpose our row-major thinking
+        let cos_r = self.rotation_angle.cos();
+        let sin_r = self.rotation_angle.sin();
+        
+        // Column-major matrix: each inner array is a column
+        // Column 0: [scale*cos, scale*sin, 0, 0]
+        // Column 1: [-scale*sin, scale*cos, 0, 0] 
+        // Column 2: [0, 0, 1, 0]
+        // Column 3: [pan_x, pan_y, 0, 1]
         [
-            [self.zoom, 0.0, 0.0, self.pan_offset.x],
-            [0.0, self.zoom, 0.0, self.pan_offset.y],
-            [0.0, 0.0, 1.0, 0.0],
-            [0.0, 0.0, 0.0, 1.0],
+            [self.zoom * cos_r, self.zoom * sin_r, 0.0, 0.0],      // Column 0
+            [-self.zoom * sin_r, self.zoom * cos_r, 0.0, 0.0],     // Column 1
+            [0.0, 0.0, 1.0, 0.0],                                   // Column 2
+            [self.pan_offset.x, self.pan_offset.y, 0.0, 1.0],      // Column 3 (translation)
         ]
     }
 }
@@ -369,7 +377,19 @@ impl FitsViewApp {
     fn handle_input(&mut self, response: &egui::Response, ctx: &egui::Context, frame: &mut eframe::Frame) {
         // Mouse drag for panning
         if response.dragged() {
-            self.viewport.pan_offset += response.drag_delta() * 0.002; // Scale factor for sensitivity
+            let mut delta = response.drag_delta();
+            // Fix inverted Y-axis: flip Y component so dragging up moves image up
+            delta.y = -delta.y;
+            
+            // Use the response rect (actual rendering area) instead of full screen
+            let render_rect = response.rect;
+            // Scale to normalized device coordinates [-1,1] based on actual render area
+            // This ensures 1:1 pixel-to-coordinate mapping within the render area
+            let sensitivity = egui::Vec2::new(
+                2.0 / render_rect.width(), 
+                2.0 / render_rect.height()
+            );
+            self.viewport.pan_offset += delta * sensitivity;
         }
         
         // Mouse scroll for zooming

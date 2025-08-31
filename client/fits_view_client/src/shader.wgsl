@@ -26,9 +26,13 @@ fn vs_main(
     var out: VertexOutput;
     out.tex_coords = model.tex_coords;
     
-    // Apply transformation matrix for pan, zoom, rotation
-    let transformed_pos = uniforms.transform * vec4<f32>(model.position, 0.0, 1.0);
-    out.clip_position = transformed_pos;
+    // Apply 2D screen-space transformation
+    // Transform the 2D position directly without 3D depth effects
+    let pos_2d = vec2<f32>(model.position.x, model.position.y);
+    let transformed_2d = (uniforms.transform * vec4<f32>(pos_2d, 0.0, 1.0)).xy;
+    
+    // Keep Z at 0 for pure 2D rendering (no depth/3D effects)
+    out.clip_position = vec4<f32>(transformed_2d, 0.0, 1.0);
     
     return out;
 }
