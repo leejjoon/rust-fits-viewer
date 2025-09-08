@@ -1,0 +1,74 @@
+{
+  "basic_cases": [
+    {
+      "name": "Zoom 1.0 -> LOD 0",
+      "zoom_level": 1.0,
+      "expected_lod": 0,
+      "explanation": "z_ideal = -log2(1.0) = 0. round(0) = 0. At 1:1 zoom, we need the highest resolution LOD 0."
+    },
+    {
+      "name": "Zoom 0.5 -> LOD 1",
+      "zoom_level": 0.5,
+      "expected_lod": 1,
+      "explanation": "z_ideal = -log2(0.5) = 1. round(1) = 1. When zoomed out by 2x, we need LOD 1 (half resolution)."
+    },
+    {
+      "name": "Zoom 0.25 -> LOD 2",
+      "zoom_level": 0.25,
+      "expected_lod": 2,
+      "explanation": "z_ideal = -log2(0.25) = 2. round(2) = 2. When zoomed out by 4x, we need LOD 2 (quarter resolution)."
+    },
+    {
+      "name": "Zoom 2.0 -> LOD 0 (clamped)",
+      "zoom_level": 2.0,
+      "expected_lod": 0,
+      "explanation": "z_ideal = -log2(2.0) = -1. round(-1) = -1. Since LOD cannot be negative, it's clamped to 0."
+    },
+    {
+      "name": "Zoom 0.7 (rounds up) -> LOD 1",
+      "zoom_level": 0.7,
+      "expected_lod": 1,
+      "explanation": "z_ideal = -log2(0.7) = 0.514. round(0.514) is 1. The ideal LOD is closer to 1 than 0."
+    },
+    {
+      "name": "Zoom 0.8 (rounds down) -> LOD 0",
+      "zoom_level": 0.8,
+      "expected_lod": 0,
+      "explanation": "z_ideal = -log2(0.8) = 0.322. round(0.322) is 0. The ideal LOD is closer to 0 than 1."
+    }
+  ],
+  "hysteresis_cases": [
+    {
+      "name": "LOD 1, zoom 0.6, no change",
+      "zoom_level": 0.6,
+      "current_lod": 1,
+      "threshold": 0.3,
+      "expected_lod": 1,
+      "explanation": "z_ideal = -log2(0.6) = 0.737. abs(0.737 - 1) = 0.263. This is less than 0.5 + 0.3 = 0.8, so LOD does not change."
+    },
+    {
+      "name": "LOD 1, zoom 0.3, change to LOD 2",
+      "zoom_level": 0.3,
+      "current_lod": 1,
+      "threshold": 0.2,
+      "expected_lod": 2,
+      "explanation": "z_ideal = -log2(0.3) = 1.737. abs(1.737 - 1) = 0.737. This is greater than 0.5 + 0.2 = 0.7, so LOD changes to round(1.737) = 2."
+    },
+    {
+      "name": "LOD 0, zoom 0.6, change to LOD 1",
+      "zoom_level": 0.6,
+      "current_lod": 0,
+      "threshold": 0.2,
+      "expected_lod": 1,
+      "explanation": "z_ideal = -log2(0.6) = 0.737. abs(0.737 - 0) = 0.737. This is greater than 0.5 + 0.2 = 0.7, so LOD changes to round(0.737) = 1."
+    },
+    {
+      "name": "LOD 2, zoom 0.8, change to LOD 0",
+      "zoom_level": 0.8,
+      "current_lod": 2,
+      "threshold": 0.2,
+      "expected_lod": 0,
+      "explanation": "z_ideal = -log2(0.8) = 0.322. abs(0.322 - 2) = 1.678. This is greater than 0.5 + 0.2 = 0.7, so LOD changes to round(0.322) = 0."
+    }
+  ]
+}
