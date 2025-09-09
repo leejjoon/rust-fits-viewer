@@ -170,25 +170,30 @@ impl GpuTileManager {
         }
     }
     
-    fn get_or_create_tile(&mut self, coord: TileCoord, device: &wgpu::Device, queue: &wgpu::Queue, _backend_url: &str, texture_bind_group_layout: &wgpu::BindGroupLayout) -> Option<&TileData> {
+    fn get_or_create_tile(&mut self, coord: TileCoord, device: &wgpu::Device, queue: &wgpu::Queue, backend_url: &str, texture_bind_group_layout: &wgpu::BindGroupLayout) -> Option<&TileData> {
         if self.tiles.contains_key(&coord) {
             return self.tiles.get(&coord);
         }
         
-        // Generate maximum contrast test pattern to debug visibility
-        let mut f32_data = vec![0.0f32; (self.tile_size * self.tile_size) as usize];
-        
-        // Create extreme contrast pattern - alternating black and white pixels
-        for y in 0..self.tile_size {
-            for x in 0..self.tile_size {
-                let idx = (y * self.tile_size + x) as usize;
-                // Create checkerboard at pixel level for maximum visibility
-                let is_white = (x + y) % 2 == 0;
-                f32_data[idx] = if is_white { 255.0 } else { 0.0 };
+        // Fetch real tile data from server
+        let f32_data = match fetch_tile_data(backend_url, coord.lod, coord.x, coord.y) {
+            Ok(raw_bytes) => {
+                match parse_raw_tile_data(&raw_bytes) {
+                    Ok(data) => {
+                        println!("✅ Fetched real tile data ({}, {}, {}) - {} pixels", coord.lod, coord.x, coord.y, data.len());
+                        data
+                    },
+                    Err(e) => {
+                        println!("⚠️ Failed to parse tile ({}, {}, {}): {}, using fallback", coord.lod, coord.x, coord.y, e);
+                        self.generate_fallback_tile()
+                    }
+                }
+            },
+            Err(e) => {
+                println!("⚠️ Failed to fetch tile ({}, {}, {}): {}, using fallback", coord.lod, coord.x, coord.y, e);
+                self.generate_fallback_tile()
             }
-        }
-        
-        println!("✅ Generated checkerboard tile ({}, {}, {})", coord.lod, coord.x, coord.y);
+        };
         
         let texture_size = wgpu::Extent3d {
             width: self.tile_size,
@@ -198,7 +203,7 @@ impl GpuTileManager {
         
         // Create texture directly using wgpu
         let texture = device.create_texture(&wgpu::TextureDescriptor {
-            label: Some("checkerboard_tile"),
+            label: Some("server_tile"),
             size: texture_size,
             mip_level_count: 1,
             sample_count: 1,
@@ -260,6 +265,21 @@ impl GpuTileManager {
         
         self.tiles.insert(coord.clone(), tile_data);
         self.tiles.get(&coord)
+    }
+    
+    fn generate_fallback_tile(&self) -> Vec<f32> {
+        let mut f32_data = vec![0.0f32; (self.tile_size * self.tile_size) as usize];
+        
+        // Create checkerboard pattern as fallback
+        for y in 0..self.tile_size {
+            for x in 0..self.tile_size {
+                let idx = (y * self.tile_size + x) as usize;
+                let is_white = (x + y) % 2 == 0;
+                f32_data[idx] = if is_white { 255.0 } else { 0.0 };
+            }
+        }
+        
+        f32_data
     }
     
     fn get_tile_offset(&self, coord: &TileCoord) -> [f32; 2] {
@@ -612,6 +632,45 @@ fn fetch_meta(backend_url: &str) -> Option<MetaResponse> {
             None
         }
     }
+}
+
+fn parse_raw_tile_data(raw_bytes: &[u8]) -> Result<Vec<f32>, String> {
+    use crate::raw_header::{RawTileHeader, DT_F32, ENDIAN_LITTLE};
+    
+    // Parse the header
+    let (header, payload) = RawTileHeader::from_prefix(raw_bytes)
+        .map_err(|e| format!("Failed to parse header: {}", e))?;
+    
+    // Validate header
+    if header.dtype_code != DT_F32 {
+        return Err(format!("Unsupported data type: {}", header.dtype_code));
+    }
+    
+    if header.endianness != ENDIAN_LITTLE {
+        return Err(format!("Unsupported endianness: {}", header.endianness));
+    }
+    
+    // Calculate expected payload size
+    let expected_size = (header.width * header.height * 4) as usize; // 4 bytes per f32
+    if payload.len() != expected_size {
+        return Err(format!("Payload size mismatch: expected {}, got {}", expected_size, payload.len()));
+    }
+    
+    // Convert bytes to f32 array
+    let f32_data: Vec<f32> = payload
+        .chunks_exact(4)
+        .map(|chunk| {
+            let bytes = [chunk[0], chunk[1], chunk[2], chunk[3]];
+            f32::from_le_bytes(bytes)
+        })
+        .collect();
+    
+    println!("📊 Parsed tile: {}x{}, {} pixels, range: {:.2}..{:.2}", 
+             header.width, header.height, f32_data.len(),
+             f32_data.iter().fold(f32::INFINITY, |a, &b| a.min(b)),
+             f32_data.iter().fold(f32::NEG_INFINITY, |a, &b| a.max(b)));
+    
+    Ok(f32_data)
 }
 
 fn fetch_tile_data(backend_url: &str, z: u32, x: u32, y: u32) -> Result<Vec<u8>, String> {

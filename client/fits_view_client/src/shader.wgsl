@@ -29,7 +29,8 @@ fn vs_main(
     model: VertexInput,
 ) -> VertexOutput {
     var out: VertexOutput;
-    out.tex_coords = model.tex_coords;
+    // Flip Y-axis for texture coordinates to correct tile orientation
+    out.tex_coords = vec2<f32>(model.tex_coords.x, 1.0 - model.tex_coords.y);
     
     // Scale the unit quad [0,1] to effective tile size and offset by tile position
     let tile_pos = model.position * uniforms.tile_size + uniforms.tile_offset;
