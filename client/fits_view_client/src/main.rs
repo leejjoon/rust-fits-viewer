@@ -338,11 +338,12 @@ struct FitsViewApp {
     _renderer: Option<Custom3d>,
     backend_url: String,
     viewport: SimpleViewport,
+    show_debug_overlay: bool,
 }
 
 impl Default for FitsViewApp {
     fn default() -> Self {
-        Self { meta: None, _renderer: None, backend_url: "http://127.0.0.1:8001".to_string(), viewport: SimpleViewport::default() }
+        Self { meta: None, _renderer: None, backend_url: "http://127.0.0.1:8001".to_string(), viewport: SimpleViewport::default(), show_debug_overlay: false }
     }
 }
 
@@ -359,10 +360,10 @@ impl FitsViewApp {
             viewport.center_on_image = image_size * 0.5 - initial_pan;
         }
 
-        Self { meta, _renderer, backend_url, viewport }
+        Self { meta, _renderer, backend_url, viewport, show_debug_overlay: false }
     }
 
-    fn handle_input(&mut self, response: &egui::Response, ctx: &egui::Context) {
+    fn handle_input(&mut self, response: &egui::Response, ctx: &egui::Context, frame: &mut eframe::Frame) {
         if response.dragged() {
             let delta = response.drag_delta();
             let pan_in_image = delta / self.viewport.zoom;
@@ -394,7 +395,104 @@ impl FitsViewApp {
                     self.viewport.reset(image_size);
                 }
             }
+            if i.key_pressed(egui::Key::Q) {
+                frame.close();
+            }
+            if i.key_pressed(egui::Key::D) {
+                self.show_debug_overlay = !self.show_debug_overlay;
+            }
         });
+    }
+
+    fn draw_debug_overlay(&self, ui: &mut egui::Ui, rect: egui::Rect, visible_tiles: &[TileCoord], meta: &MetaResponse) {
+        let painter = ui.painter();
+        
+        // Draw render screen boundary (black rectangle)
+        painter.rect_stroke(rect, 0.0, egui::Stroke::new(2.0, egui::Color32::BLACK));
+        
+        // Calculate image screen extent
+        let image_size = ImageSize { width: meta.shape[1] as f32, height: meta.shape[0] as f32 };
+        let render_size = RenderSize { width: rect.width(), height: rect.height() };
+        let core_viewport = Viewport {
+            zoom: self.viewport.zoom,
+            center_on_image: [self.viewport.center_on_image.x, self.viewport.center_on_image.y],
+            rotation_angle: self.viewport.rotation_angle,
+        };
+        
+        // Calculate image extent in screen coordinates
+        let image_extent = fits_view_client::calculate_image_screen_extent(&core_viewport, render_size, image_size);
+        
+        // Convert from Y-up coordinate system to egui's Y-down coordinate system
+        let extent_min_x = rect.min.x + image_extent.min[0] as f32;
+        let extent_min_y = rect.min.y + (rect.height() - image_extent.max[1] as f32);
+        let extent_width = (image_extent.max[0] - image_extent.min[0]) as f32;
+        let extent_height = (image_extent.max[1] - image_extent.min[1]) as f32;
+        
+        let extent_rect = egui::Rect::from_min_size(
+            egui::Pos2::new(extent_min_x, extent_min_y),
+            egui::Vec2::new(extent_width, extent_height)
+        );
+        
+        // Draw image screen extent (red dashed rectangle)
+        painter.rect_stroke(extent_rect, 0.0, egui::Stroke::new(2.0, egui::Color32::RED));
+        
+        // Draw visible tiles
+        for tile_coord in visible_tiles {
+            let lod_scale = 2_u32.pow(tile_coord.lod) as f32;
+            let effective_tile_size = meta.tile_size as f32 * lod_scale;
+            
+            // Calculate tile position in image coordinates
+            let tile_image_x = tile_coord.x as f32 * effective_tile_size;
+            let tile_image_y = tile_coord.y as f32 * effective_tile_size;
+            
+            // Transform to screen coordinates using the same logic as the shader
+            let scale_x = (2.0 * self.viewport.zoom) / rect.width();
+            let scale_y = (2.0 * self.viewport.zoom) / rect.height();
+            
+            // Convert image coordinates to NDC, then to screen coordinates
+            let ndc_x = (tile_image_x - self.viewport.center_on_image.x) * scale_x;
+            let ndc_y = (tile_image_y - self.viewport.center_on_image.y) * scale_y;
+            
+            let screen_x = rect.min.x + (ndc_x + 1.0) * rect.width() / 2.0;
+            let screen_y = rect.min.y + (1.0 - ndc_y) * rect.height() / 2.0; // Flip Y for screen coordinates
+            
+            let tile_screen_size = effective_tile_size * self.viewport.zoom;
+            
+            let tile_rect = egui::Rect::from_min_size(
+                egui::Pos2::new(screen_x, screen_y - tile_screen_size), // Adjust for Y-up to Y-down conversion
+                egui::Vec2::new(tile_screen_size, tile_screen_size)
+            );
+            
+            // Draw tile boundary (green for visible tiles)
+            painter.rect_stroke(tile_rect, 0.0, egui::Stroke::new(1.0, egui::Color32::GREEN));
+            
+            // Draw tile coordinates
+            let text = format!("({},{},{})", tile_coord.x, tile_coord.y, tile_coord.lod);
+            painter.text(
+                tile_rect.center(),
+                egui::Align2::CENTER_CENTER,
+                text,
+                egui::FontId::monospace(10.0),
+                egui::Color32::WHITE
+            );
+        }
+        
+        // Draw debug info text
+        let debug_text = format!(
+            "Debug Overlay (D to toggle)\nZoom: {:.2}x\nCenter: ({:.1}, {:.1})\nVisible Tiles: {}",
+            self.viewport.zoom,
+            self.viewport.center_on_image.x,
+            self.viewport.center_on_image.y,
+            visible_tiles.len()
+        );
+        
+        painter.text(
+            rect.min + egui::Vec2::new(10.0, 10.0),
+            egui::Align2::LEFT_TOP,
+            debug_text,
+            egui::FontId::monospace(12.0),
+            egui::Color32::YELLOW
+        );
     }
 }
 
@@ -407,7 +505,7 @@ fn screen_to_image_local(screen_pos: egui::Pos2, rect: &egui::Rect, viewport: &S
 }
 
 impl eframe::App for FitsViewApp {
-    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+    fn update(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
         egui::CentralPanel::default().show(ctx, |ui| {
             ui.heading("FITS View");
             if let Some(meta) = &self.meta {
@@ -418,7 +516,7 @@ impl eframe::App for FitsViewApp {
             }
 
             let (rect, response) = ui.allocate_exact_size(ui.available_size(), egui::Sense::click_and_drag());
-            self.handle_input(&response, ctx);
+            self.handle_input(&response, ctx, frame);
 
             if let Some(meta) = &self.meta {
                 let image_size = ImageSize { width: meta.shape[1] as f32, height: meta.shape[0] as f32 };
@@ -436,6 +534,7 @@ impl eframe::App for FitsViewApp {
                 let backend_url_clone = self.backend_url.clone();
                 let meta_clone = meta.clone();
                 let visible_tiles_clone = visible_tiles.clone();
+                let visible_tiles_debug = visible_tiles.clone();
 
                 let callback = egui::PaintCallback {
                     rect,
@@ -489,6 +588,11 @@ impl eframe::App for FitsViewApp {
                     ),
                 };
                 ui.painter().add(callback);
+                
+                // Draw debug overlay if enabled
+                if self.show_debug_overlay {
+                    self.draw_debug_overlay(ui, rect, &visible_tiles_debug, meta);
+                }
             }
         });
     }
