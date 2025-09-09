@@ -34,6 +34,14 @@ struct Args {
     /// Initial zoom level (for testing) - 1.0 = fit to window
     #[arg(long, default_value = "1.0")]
     initial_zoom: f32,
+    
+    /// Window width for testing (affects coordinate calculations)
+    #[arg(long, default_value = "800")]
+    window_width: u32,
+    
+    /// Window height for testing (affects coordinate calculations)
+    #[arg(long, default_value = "600")]
+    window_height: u32,
 }
 
 // Simple viewport struct for main.rs
@@ -491,7 +499,7 @@ impl Default for FitsViewApp {
 }
 
 impl FitsViewApp {
-    fn new(cc: &eframe::CreationContext<'_>, backend_url: String, initial_pan_pixels: Option<egui::Vec2>, initial_zoom: f32) -> Self {
+    fn new(cc: &eframe::CreationContext<'_>, backend_url: String, initial_pan_pixels: Option<egui::Vec2>, initial_zoom: f32, window_size: egui::Vec2) -> Self {
         let meta = fetch_meta(&backend_url);
         let renderer = {
             let wgpu_render_state = cc.wgpu_render_state.as_ref().expect("wgpu backend");
@@ -504,7 +512,6 @@ impl FitsViewApp {
         
         let mut viewport = SimpleViewport::default();
         if let Some(meta) = &meta {
-            let window_size = egui::Vec2::new(800.0, 600.0); // Default window size
             let image_size = egui::Vec2::new(meta.shape[1] as f32, meta.shape[0] as f32);
             viewport.fit_to_window(window_size, image_size);
             
@@ -1262,13 +1269,15 @@ fn main() -> eframe::Result<()> {
     let backend_url = args.backend_url.clone();
     let initial_pan_pixels = egui::Vec2::new(args.initial_pan_x, args.initial_pan_y);
     let initial_zoom = args.initial_zoom;
+    let window_size = egui::Vec2::new(args.window_width as f32, args.window_height as f32);
     
     let mut native_options = eframe::NativeOptions::default();
     native_options.renderer = eframe::Renderer::Wgpu;
+    native_options.initial_window_size = Some(egui::Vec2::new(args.window_width as f32, args.window_height as f32));
     eframe::run_native(
         "FITS View",
         native_options,
-        Box::new(move |cc| Box::new(FitsViewApp::new(cc, backend_url, Some(initial_pan_pixels), initial_zoom))),
+        Box::new(move |cc| Box::new(FitsViewApp::new(cc, backend_url, Some(initial_pan_pixels), initial_zoom, window_size))),
     )
 }
 
