@@ -71,15 +71,18 @@ The core of the viewer is a single matrix, `M_image_to_ndc`, that transforms a v
 
 ## 3. Visible Tile Calculation
 
-- Compute the **viewport corners in NDC**: `(-1,-1), (1,-1), (1,1), (-1,1)`.
-- Transform each through `M_inv` (inverse of image→NDC) to get 4 points in image space.
-- Take the **AABB (axis-aligned bounding box)** of those 4 points.
-- Convert bounds to tile indices:
+- **Define a padding in screen space.** A good value for this padding is half the tile size (e.g., `0.5 * tile_size` pixels). This padding is added to each side of the render screen area.
+- **Define the corners of the padded screen area.** For a render screen of size `(render_width, render_height)` and padding `p`, the corners are `(-p, -p)`, `(render_width + p, -p)`, `(render_width + p, render_height + p)`, and `(-p, render_height + p)`.
+- **Transform the padded screen area corners to image space.** This is done by applying the inverse transformation from screen space to image space, considering the current zoom and pan.
+- **Calculate the axis-aligned bounding box (AABB)** of the transformed points in image space. This gives the range of image coordinates `(min_x, max_x)` and `(min_y, max_y)` that need to be displayed.
+- **Convert the image coordinate bounds to tile indices.**
   ```
   min_tx = floor(min_x / tile_size)
-  max_tx = floor(max_x / tile_size)
+  max_tx = ceil(max_x / tile_size)
+  min_ty = floor(min_y / tile_size)
+  max_ty = ceil(max_y / tile_size)
   ```
-- Add **1-tile padding** to avoid popping during slow pan/rotation.
+- The tiles within this range of indices are selected for rendering.
 
 ---
 
