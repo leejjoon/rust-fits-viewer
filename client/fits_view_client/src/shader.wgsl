@@ -31,10 +31,10 @@ fn vs_main(
     let tile_size = 256.0;
     let tile_pos = model.position * tile_size + uniforms.tile_offset;
     
-    // Apply viewport transformation (pan, zoom, rotation)
+    // Apply viewport transformation (pan, zoom, rotation) using the transformation matrix
     let transformed_2d = (uniforms.transform * vec4<f32>(tile_pos, 0.0, 1.0)).xy;
     
-    // Keep Z at 0 for pure 2D rendering
+    // Render tiles at standard depth
     out.clip_position = vec4<f32>(transformed_2d, 0.0, 1.0);
     
     return out;
