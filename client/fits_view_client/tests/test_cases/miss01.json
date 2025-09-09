@@ -1,0 +1,44 @@
+{
+  "name": "miss01",
+  "input": {
+    "render_size": [
+      600,
+      400
+    ],
+    "image_size": [
+      1024,
+      1024
+    ],
+    "zoom": 1.1443,
+    "pan_offset": [
+      343.8,
+      468.0
+    ],
+    "tile_size": 256
+  },
+  "output": {
+    "lod": 0,
+    "padded_area": [
+      -128.0,
+      -128.0,
+      856.0,
+      656.0
+    ],
+    "visibility_mask": [
+      "0000",
+      "0000",
+      "0000",
+      "0000"
+    ],
+    "image_screen_extent": {
+      "min": [
+        58,
+        -854
+      ],
+      "max": [
+        1230,
+        318
+      ]
+    }
+  }
+}

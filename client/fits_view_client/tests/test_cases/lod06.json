@@ -1,0 +1,41 @@
+{
+  "name": "lod06",
+  "input": {
+    "render_size": [
+      500,
+      500
+    ],
+    "image_size": [
+      4096,
+      4096
+    ],
+    "zoom": 0.01,
+    "pan_offset": [
+      0.0,
+      0.0
+    ],
+    "tile_size": 256
+  },
+  "output": {
+    "lod": 4,
+    "padded_area": [
+      -128.0,
+      -128.0,
+      756.0,
+      756.0
+    ],
+    "visibility_mask": [
+      "1"
+    ],
+    "image_screen_extent": {
+      "min": [
+        230,
+        230
+      ],
+      "max": [
+        270,
+        270
+      ]
+    }
+  }
+}

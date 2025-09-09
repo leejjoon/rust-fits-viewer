@@ -1,0 +1,43 @@
+{
+  "name": "simple04",
+  "input": {
+    "render_size": [
+      800,
+      600
+    ],
+    "image_size": [
+      800,
+      600
+    ],
+    "zoom": 1.0,
+    "pan_offset": [
+      100.0,
+      500.0
+    ],
+    "tile_size": 256
+  },
+  "output": {
+    "lod": 0,
+    "padded_area": [
+      -128.0,
+      -128.0,
+      1056.0,
+      856.0
+    ],
+    "visibility_mask": [
+      "0000",
+      "0000",
+      "0000"
+    ],
+    "image_screen_extent": {
+      "min": [
+        100,
+        -500
+      ],
+      "max": [
+        900,
+        100
+      ]
+    }
+  }
+}

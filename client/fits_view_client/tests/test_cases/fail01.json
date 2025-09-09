@@ -1,0 +1,42 @@
+{
+  "name": "fail01",
+  "input": {
+    "render_size": [
+      800,
+      600
+    ],
+    "image_size": [
+      1024,
+      1024
+    ],
+    "zoom": 0.586,
+    "pan_offset": [
+      0.0,
+      0.0
+    ],
+    "tile_size": 256
+  },
+  "output": {
+    "lod": 1,
+    "padded_area": [
+      -128.0,
+      -128.0,
+      1056.0,
+      856.0
+    ],
+    "visibility_mask": [
+      "11",
+      "11"
+    ],
+    "image_screen_extent": {
+      "min": [
+        100,
+        0
+      ],
+      "max": [
+        700,
+        600
+      ]
+    }
+  }
+}
