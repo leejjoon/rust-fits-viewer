@@ -108,22 +108,36 @@ The project has successfully implemented the fundamental data pipeline and rende
     - ✅ Proper wgpu bind group configuration for dynamic offsets
     - ✅ Multi-tile rendering tested and verified with live server data
 
-**🔄 IN PROGRESS:**
-- Performance optimizations and advanced features
+**✅ COMPLETED (Critical Bug Fixes & Testing):**
+
+5.  **Tile Rendering Bug Fixes (COMPLETE):**
+    - ✅ **CRITICAL BUG FIXED:** Pan offset calculation in `get_visible_tiles` was multiplying by render_size
+    - ✅ Fixed pan calculation from `pan_in_image_x = -self.pan_offset.x * render_size.x * 0.5 * zoom_inv` to `pan_in_image_x = -self.pan_offset.x * zoom_inv`
+    - ✅ Resolved issue where any pan offset resulted in 0 visible tiles
+    - ✅ Updated both `src/main.rs` and `src/lib.rs` implementations for consistency
+    - ✅ All viewport navigation and multi-tile rendering now functional
+
+6.  **Testing Framework (COMPLETE):**
+    - ✅ Created comprehensive test suite with unit, integration, and visual snapshot tests
+    - ✅ Added command line parameters `--initial-pan-x` and `--initial-pan-y` for automated testing
+    - ✅ Implemented mock tile server with predictable 2x2 tile patterns for validation
+    - ✅ Visual snapshot tests verify tile positioning by panning to specific image corners
+    - ✅ All tests pass showing correct tile visibility (4 tiles vs previous 0)
+    - ✅ Robust testing infrastructure for catching rendering regressions
 
 **📋 PENDING (Priority Order):**
 
-4.  **Tile Cache System:**
+7.  **Tile Cache System:**
     - Implement LRU tile cache with GPU memory budget (512 MB target)
     - Add tile prefetching along motion vectors
     - Implement request cancellation on zoom changes
 
-5.  **Advanced Rendering Features:**
+8.  **Advanced Rendering Features:**
     - Add fragment shader support for different stretch modes (linear, log, sqrt, asinh)
     - Implement colormap texture support (1D texture lookup)
     - Add NaN value handling with reserved colormap entry
 
-6.  **Performance & Polish:**
+9.  **Performance & Polish:**
     - Add async tile loading for smooth interaction
     - Implement visual feedback for loading states
     - Add error handling for network failures

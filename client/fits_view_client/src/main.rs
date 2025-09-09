@@ -23,11 +23,11 @@ struct Args {
     #[arg(long, default_value = "http://127.0.0.1:8001")]
     backend_url: String,
     
-    /// Initial pan offset X (for testing)
+    /// Initial pan offset X in NDC space (for testing) - positive = right
     #[arg(long, default_value = "0.0")]
     initial_pan_x: f32,
     
-    /// Initial pan offset Y (for testing)
+    /// Initial pan offset Y in NDC space (for testing) - positive = up
     #[arg(long, default_value = "0.0")]
     initial_pan_y: f32,
 }

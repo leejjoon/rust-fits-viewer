@@ -44,6 +44,13 @@ By the end of this phase:
 
 The client now takes on all rendering transformations, enabling dynamic interaction (rotation, stretch modes, colormaps).
 
+### Coordinate System Conventions
+
+* **Global convention:** Y-up across all spaces (image, tile, NDC, clip)
+* **Tile index origin:** Bottom-left (consistent with Y-up)
+* **Texture coordinates:** WebGPU/WGPU convention — `(0,0)` is top-left of texture
+* **Matrices:** Column-major; vectors are column vectors; transformations applied as `M * v`
+
 ### Data Flow (RAW Mode)
 
 1. User calls `fits_view.show(array)` in Python.
@@ -111,9 +118,12 @@ HTTP headers may mirror these for debugging.
 
 1. Initialize `wgpu` adapter/device/queue/surface.
 2. Create a `RenderPipeline` with WGSL shaders.
-3. **Vertex Shader**: apply pan/zoom/rotation matrix around view center.
-4. **Fragment Shader**: normalize values, apply colormap, branch NaN → special color.
-5. Use `textureSampleLevel` with explicit LOD for smoother zoom-outs.
+3. **Transform Chain**: `Image Space → NDC → Clip Space`
+   * Single matrix `M_image_to_ndc` combines all transformations
+   * Transformation order: translate to center → rotate → pan → zoom → scale to NDC
+4. **Vertex Shader**: apply `M_image_to_ndc` matrix to transform vertices
+5. **Fragment Shader**: normalize values, apply colormap, branch NaN → special color
+6. Use `textureSampleLevel` with explicit LOD for smoother zoom-outs
 
 ### B. Uniforms
 
@@ -151,32 +161,49 @@ struct FitsViewApp {
 * `R` → reset view
 * `F` → fit to window
 
-### E. Tile Cache
+### E. Tile Cache & LOD Selection
 
-* LRU eviction by GPU memory budget (e.g., 512 MB).
-* Prefetch neighbors along motion vector.
-* Cancel redundant requests on zoom change.
+* **LRU eviction** by GPU memory budget (e.g., 512 MB)
+* **Prefetch neighbors** along motion vector
+* **Cancel redundant requests** on zoom change
+* **LOD Selection Algorithm**:
+  * Calculate ideal LOD: `z_ideal = -log2(zoom_factor)`
+  * Round to nearest integer: `lod_to_request = round(z_ideal)`
+  * Apply hysteresis to prevent flickering: only change LOD if `abs(z_ideal - current_lod) > 0.5 + threshold`
+  * Clamp to maximum useful LOD where scaled image > tile_size
+
+### F. Visible Tile Calculation
+
+* **Padding**: Add half tile size padding to screen area
+* **Transform corners**: Apply inverse transformation to padded screen corners
+* **AABB calculation**: Find axis-aligned bounding box in image space
+* **Tile indices**: Convert image bounds to tile coordinates using `floor/ceil`
 
 ---
 
 ## 6. Testing Plan
 
 * **Unit Tests**
-
-  * Normalization functions (linear/log/sqrt/asinh).
-  * Matrix generation (zoom/pan/rotation correctness).
+  * Image ↔ Tile coordinate transformations
+  * Matrix generation and inverse operations
+  * LOD calculation and hysteresis logic
+  * Normalization functions (linear/log/sqrt/asinh)
 * **Integration Tests**
-
-  * Simulated egui interactions (mouse, sliders).
-  * Mock server with deterministic gradients.
+  * Tile → Image → NDC transformation chain
+  * Visible tile calculation with padding
+  * Zoom-to-cursor invariant testing
+  * Simulated egui interactions (mouse, sliders)
+  * Mock server with deterministic gradients
 * **Visual Regression Tests**
-
-  * Automated pan/zoom/rotate with screenshots.
-  * Compare with golden images using **SSIM ≥ 0.995** (not pixel-exact).
-  * Run across backends (Vulkan/DX12/Metal).
+  * Shader vertex transform validation (UV orientation)
+  * Tile seam testing (no background lines)
+  * Automated pan/zoom/rotate with screenshots
+  * Compare with golden images using **SSIM ≥ 0.995**
+  * Run across backends (Vulkan/DX12/Metal)
 * **Performance Baseline**
-
-  * Record FPS, p95 frame time. Alert on >20% regression.
+  * Record FPS, p95 frame time. Alert on >20% regression
+  * Test with very large images (≥32k px)
+  * Validate fractional scales on HiDPI displays
 
 ---
 
