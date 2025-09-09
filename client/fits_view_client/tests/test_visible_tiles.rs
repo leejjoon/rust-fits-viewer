@@ -1,7 +1,7 @@
 use serde::Deserialize;
 use std::fs;
 use std::path::Path;
-use fits_view_client::{TileCoord, Viewport, RenderSize, ImageSize, calculate_visible_tiles, calculate_max_lod};
+use fits_view_client::{Viewport, RenderSize, ImageSize, calculate_visible_tiles, calculate_max_lod, tile_manager::TileCoord};
 use egui;
 
 #[derive(Deserialize, Debug)]
@@ -152,7 +152,7 @@ fn test_visible_tile_calculation() {
             for x in 0..mask_cols.min(row_str.len() as u32) {
                 let is_selected_in_mask = row_str.chars().nth(x as usize).unwrap_or('0') == '1';
                 
-                let tile_coord = TileCoord { z: case.input.lod, x, y };
+                let tile_coord = TileCoord { lod: case.input.lod, x, y };
                 let is_selected_in_code = visible_tiles.contains(&tile_coord);
 
                 if is_selected_in_mask != is_selected_in_code {

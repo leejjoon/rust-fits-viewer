@@ -15,6 +15,10 @@ struct Uniforms {
     tile_offset: vec2<f32>,
     vmin: f32,
     vmax: f32,
+    tile_size: f32,
+    _padding1: f32,
+    _padding2: vec2<f32>,
+    _padding3: vec4<f32>,
 };
 
 @group(1) @binding(0)
@@ -27,9 +31,8 @@ fn vs_main(
     var out: VertexOutput;
     out.tex_coords = model.tex_coords;
     
-    // Scale the unit quad [0,1] to tile size (256x256 pixels) and offset by tile position
-    let tile_size = 256.0;
-    let tile_pos = model.position * tile_size + uniforms.tile_offset;
+    // Scale the unit quad [0,1] to effective tile size and offset by tile position
+    let tile_pos = model.position * uniforms.tile_size + uniforms.tile_offset;
     
     // Apply viewport transformation (pan, zoom, rotation) using the transformation matrix
     let transformed_2d = (uniforms.transform * vec4<f32>(tile_pos, 0.0, 1.0)).xy;

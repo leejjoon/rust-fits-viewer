@@ -12,7 +12,7 @@ use crate::upload::upload_r32float_texture;
 use fits_view_client::{
     MetaResponse, Viewport, 
     RenderSize, ImageSize, 
-    create_image_to_ndc_matrix, calculate_max_lod, calculate_visible_tiles,
+    create_image_to_ndc_matrix, calculate_max_lod, calculate_lod, calculate_visible_tiles,
     tile_manager::{TileManager, TileCoord},
 };
 
@@ -120,11 +120,14 @@ const INDICES: &[u16] = &[0, 1, 2, 0, 2, 3];
 #[repr(C)]
 #[derive(Copy, Clone, Debug, bytemuck::Pod, bytemuck::Zeroable)]
 struct Uniforms {
-    transform: [[f32; 4]; 4], // 4x4 transformation matrix
-    tile_offset: [f32; 2], // Tile position offset in image coordinates
+    transform: [[f32; 4]; 4], // 4x4 transformation matrix (64 bytes)
+    tile_offset: [f32; 2], // Tile position offset in image coordinates (8 bytes)
     vmin: f32,
     vmax: f32,
-    _padding: [f32; 2], // Align to 16 bytes
+    tile_size: f32,
+    _padding1: f32,
+    _padding2: [f32; 2],
+    _padding3: [f32; 4],
 }
 
 
@@ -311,6 +314,8 @@ impl Custom3d {
             label: Some("texture_bind_group_layout"),
         });
 
+        let uniforms_size = std::mem::size_of::<Uniforms>();
+        
         let uniform_bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             entries: &[
                 wgpu::BindGroupLayoutEntry {
@@ -319,7 +324,7 @@ impl Custom3d {
                     ty: wgpu::BindingType::Buffer {
                         ty: wgpu::BufferBindingType::Uniform,
                         has_dynamic_offset: true,
-                        min_binding_size: wgpu::BufferSize::new(std::mem::size_of::<Uniforms>() as u64),
+                        min_binding_size: wgpu::BufferSize::new(uniforms_size as u64),
                     },
                     count: None,
                 },
@@ -355,7 +360,7 @@ impl Custom3d {
                     resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
                         buffer: &uniform_buffer,
                         offset: 0,
-                        size: wgpu::BufferSize::new(std::mem::size_of::<Uniforms>() as u64),
+                        size: wgpu::BufferSize::new(uniforms_size as u64),
                     }),
                 },
             ],
@@ -687,12 +692,24 @@ impl eframe::App for FitsViewApp {
                 ui.label("Failed to fetch metadata. Is the server running?");
             }
             
-            // Display viewport info
-            ui.label(format!("Zoom: {:.2}x, Pan: ({:.1}, {:.1}), Rotation: {:.1}°", 
+            // Display viewport info including LOD
+            let current_lod = if let Some(meta) = &self.meta {
+                let image_size = ImageSize { 
+                    width: meta.shape[0] as f32, 
+                    height: meta.shape[1] as f32 
+                };
+                let max_lod = calculate_max_lod(image_size, meta.tile_size);
+                calculate_lod(self.viewport.zoom, max_lod)
+            } else {
+                0
+            };
+            
+            ui.label(format!("Zoom: {:.2}x, Pan: ({:.1}, {:.1}), Rotation: {:.1}°, LOD: {}", 
                 self.viewport.zoom, 
                 self.viewport.pan_offset.x, 
                 self.viewport.pan_offset.y, 
-                self.viewport.rotation_angle.to_degrees()));
+                self.viewport.rotation_angle.to_degrees(),
+                current_lod));
             
             ui.separator();
             let (rect, response) = ui.allocate_exact_size(ui.available_size(), egui::Sense::click_and_drag());
@@ -855,15 +872,18 @@ impl eframe::App for FitsViewApp {
                         
                         // Check if tiles are positioned within viewport
                         for tile_coord in &visible_tiles {
-                            let tile_offset_x = tile_coord.x as f32 * resources.tile_manager.tile_size as f32;
-                            let tile_offset_y = tile_coord.y as f32 * resources.tile_manager.tile_size as f32;
+                            // Account for LOD scaling in debug output
+                            let lod_scale = 2_u32.pow(tile_coord.lod) as f32;
+                            let effective_tile_size = resources.tile_manager.tile_size as f32 * lod_scale;
+                            let tile_offset_x = tile_coord.x as f32 * effective_tile_size;
+                            let tile_offset_y = tile_coord.y as f32 * effective_tile_size;
                             
                             // Calculate where this tile will appear in NDC space
                             let tile_corners = [
                                 [tile_offset_x, tile_offset_y, 0.0, 1.0],
-                                [tile_offset_x + 256.0, tile_offset_y, 0.0, 1.0],
-                                [tile_offset_x, tile_offset_y + 256.0, 0.0, 1.0],
-                                [tile_offset_x + 256.0, tile_offset_y + 256.0, 0.0, 1.0],
+                                [tile_offset_x + effective_tile_size, tile_offset_y, 0.0, 1.0],
+                                [tile_offset_x, tile_offset_y + effective_tile_size, 0.0, 1.0],
+                                [tile_offset_x + effective_tile_size, tile_offset_y + effective_tile_size, 0.0, 1.0],
                             ];
                             
                             println!("🔲 Tile ({},{},{}) offset: ({:.1}, {:.1})", tile_coord.lod, tile_coord.x, tile_coord.y, tile_offset_x, tile_offset_y);
@@ -885,16 +905,22 @@ impl eframe::App for FitsViewApp {
                         let mut tile_index = 0;
                         for tile_coord in &visible_tiles {
                             if resources.tile_manager.tiles.contains_key(tile_coord) {
-                                let tile_offset_x = tile_coord.x as f32 * resources.tile_manager.tile_size as f32;
+                                // Account for LOD scaling: at LOD n, each tile represents 2^n times larger area
+                                let lod_scale = 2_u32.pow(tile_coord.lod) as f32;
+                                let effective_tile_size = resources.tile_manager.tile_size as f32 * lod_scale;
+                                let tile_offset_x = tile_coord.x as f32 * effective_tile_size;
                                 // Direct Y coordinate - no flipping needed as coordinate_transform handles this
-                                let tile_offset_y = tile_coord.y as f32 * resources.tile_manager.tile_size as f32;
+                                let tile_offset_y = tile_coord.y as f32 * effective_tile_size;
                                 
                                 let tile_uniforms = Uniforms {
                                     transform: transform_matrix,
                                     tile_offset: [tile_offset_x, tile_offset_y],
                                     vmin,
                                     vmax,
-                                    _padding: [0.0, 0.0],
+                                    tile_size: effective_tile_size,
+                                    _padding1: 0.0,
+                                    _padding2: [0.0, 0.0],
+                                    _padding3: [0.0, 0.0, 0.0, 0.0],
                                 };
                                 
                                 // Write uniform data at 256-byte aligned offset
@@ -1018,8 +1044,11 @@ impl FitsViewApp {
             
             // Draw each visible tile boundary (show all tiles in boundary)
             for tile_coord in &visible_tiles {
-                let tile_offset_x = tile_coord.x as f32 * meta.tile_size as f32;
-                let tile_offset_y = tile_coord.y as f32 * meta.tile_size as f32;
+                // Account for LOD scaling: at LOD n, each tile represents 2^n times larger area
+                let lod_scale = 2_u32.pow(tile_coord.lod) as f32;
+                let effective_tile_size = meta.tile_size as f32 * lod_scale;
+                let tile_offset_x = tile_coord.x as f32 * effective_tile_size;
+                let tile_offset_y = tile_coord.y as f32 * effective_tile_size;
                 
                 // Match exactly what the shader does:
                 // 1. Unit quad vertices [0,1] scaled to tile_size + tile_offset
@@ -1033,10 +1062,9 @@ impl FitsViewApp {
                 
                 let mut screen_corners = Vec::new();
                 for vertex in &unit_quad {
-                    // Scale unit quad to tile size and add offset (same as shader line 32)
-                    let tile_size_f = meta.tile_size as f32;
-                    let tile_pos_x = vertex[0] * tile_size_f + tile_offset_x;
-                    let tile_pos_y = vertex[1] * tile_size_f + tile_offset_y;
+                    // Scale unit quad to effective tile size and add offset (same as shader line 32)
+                    let tile_pos_x = vertex[0] * effective_tile_size + tile_offset_x;
+                    let tile_pos_y = vertex[1] * effective_tile_size + tile_offset_y;
                     
                     // Apply transformation matrix (same as shader line 35)
                     // WGSL uses column-major matrix multiplication: transform * vec4(tile_pos, 0.0, 1.0)
@@ -1062,13 +1090,15 @@ impl FitsViewApp {
                 }
             }
             
-            // Show current viewport info
+            // Show current viewport info including LOD
+            let current_lod = calculate_lod(self.viewport.zoom, calculate_max_lod(image_size, meta.tile_size));
             let info_text = format!(
-                "Zoom: {:.3}\nPan: ({:.3}, {:.3})\nRotation: {:.3}°\nTiles: {}",
+                "Zoom: {:.3}\nPan: ({:.3}, {:.3})\nRotation: {:.3}°\nLOD: {}\nTiles: {}",
                 self.viewport.zoom,
                 self.viewport.pan_offset.x,
                 self.viewport.pan_offset.y,
                 self.viewport.rotation_angle.to_degrees(),
+                current_lod,
                 visible_tiles.len()
             );
             
