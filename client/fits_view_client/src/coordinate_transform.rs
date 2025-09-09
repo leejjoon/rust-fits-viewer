@@ -7,7 +7,7 @@ use crate::tile_manager::TileCoord;
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 pub struct Viewport {
     pub zoom: f32,
-    pub pan_offset: [f32; 2], // Use array for JSON compatibility
+    pub center_on_image: [f32; 2], // The image point at the center of the viewport
     pub rotation_angle: f32,
 }
 
@@ -15,7 +15,7 @@ impl Default for Viewport {
     fn default() -> Self {
         Self {
             zoom: 1.0,
-            pan_offset: [0.0, 0.0],
+            center_on_image: [0.0, 0.0], // Caller should set a proper default (e.g., image center)
             rotation_angle: 0.0,
         }
     }
@@ -33,76 +33,49 @@ pub struct ImageSize {
     pub height: f32,
 }
 
-// TileCoord is now defined in tile_manager.rs
+// ... (TileCoord is in tile_manager.rs)
 
-/// Calculate LOD based on zoom level following pipeline spec section 4.2
-/// z_ideal = -log2(zoom)
-/// lod_to_request = round(z_ideal)
+/// Calculate LOD based on zoom level
 pub fn calculate_lod(zoom: f32, max_lod: u32) -> u32 {
     if zoom <= 0.0 {
         return max_lod;
     }
-    
     let z_ideal = -zoom.log2();
     let lod_to_request = z_ideal.round() as i32;
-    
-    // Clamp to valid range [0, max_lod]
     (lod_to_request.max(0) as u32).min(max_lod)
 }
 
-/// Calculate maximum useful LOD level based on image and tile size
+/// Calculate maximum useful LOD level
 pub fn calculate_max_lod(image_size: ImageSize, tile_size: u32) -> u32 {
-    let min_image_dimension = image_size.width.min(image_size.height);
-    
-    if min_image_dimension <= tile_size as f32 {
+    let min_dim = image_size.width.min(image_size.height);
+    if min_dim <= tile_size as f32 {
         return 0;
     }
-    
-    let max_lod_float = (min_image_dimension / tile_size as f32).log2();
+    let max_lod_float = (min_dim / tile_size as f32).log2();
     (max_lod_float.floor() as u32).max(0)
 }
 
 /// Transform screen coordinates to image coordinates
-/// Following pipeline spec section 2.3 inverse transformation
 pub fn screen_to_image(
     screen_x: f32,
     screen_y: f32,
     viewport: &Viewport,
     render_size: RenderSize,
-    image_size: ImageSize,
 ) -> (f32, f32) {
-    // Step 1: Convert screen coordinates to NDC (-1 to +1)
-    // (0,0) in screen space is top-left, but for calculations we use bottom-left as origin.
-    // The rendering setup uses a Y-up convention, so we must account for that here.
-    // In `main.rs`, mouse Y is inverted for panning, and screen_y for zoom-to-cursor is calculated from top.
-    // Let's assume screen_y comes in with Y-down (top-left origin).
     let ndc_x = (screen_x / render_size.width) * 2.0 - 1.0;
     let ndc_y = (screen_y / render_size.height) * 2.0 - 1.0;
-
-    // Step 2: Invert the transformation from `create_image_to_ndc_matrix`
-    // The forward transformation is:
-    // ndc = (image_pos - image_center) * scale + pan
-    // So, the inverse is:
-    // image_pos = (ndc - pan) / scale + image_center
 
     let scale_x = (2.0 * viewport.zoom) / render_size.width;
     let scale_y = (2.0 * viewport.zoom) / render_size.height;
 
-    let image_center_x = image_size.width / 2.0;
-    let image_center_y = image_size.height / 2.0;
-
-    // The pan offset is in NDC space.
-    let pan_offset_x = viewport.pan_offset[0];
-    let pan_offset_y = viewport.pan_offset[1];
-
-    // Apply the inverse transformation
-    let ix = (ndc_x - pan_offset_x) / scale_x + image_center_x;
-    let iy = (ndc_y - pan_offset_y) / scale_y + image_center_y;
+    let ix = (ndc_x / scale_x) + viewport.center_on_image[0];
+    let iy = (ndc_y / scale_y) + viewport.center_on_image[1];
 
     (ix, iy)
 }
 
-/// Calculate visible tiles following pipeline spec section 3
+
+/// Calculate visible tiles
 pub fn calculate_visible_tiles(
     viewport: &Viewport,
     render_size: RenderSize,
@@ -110,12 +83,7 @@ pub fn calculate_visible_tiles(
     tile_size: u32,
     max_lod: u32,
 ) -> Vec<TileCoord> {
-    let mut visible_tiles = Vec::new();
-    
-    // Calculate LOD for current zoom level
     let lod = calculate_lod(viewport.zoom, max_lod);
-    
-    // Step 1: Define padded screen area corners (half tile size padding)
     let padding = tile_size as f32 * 0.5;
     let corners_screen = [
         (-padding, -padding),
@@ -123,56 +91,33 @@ pub fn calculate_visible_tiles(
         (render_size.width + padding, render_size.height + padding),
         (-padding, render_size.height + padding),
     ];
-    
-    // Step 2: Transform corners to image space
-    let mut corners_image = Vec::new();
-    for (sx, sy) in corners_screen.iter() {
-        let (ix, iy) = screen_to_image(*sx, *sy, viewport, render_size, image_size);
-        corners_image.push((ix, iy));
-    }
-    
-    println!("🔍 Screen to image transformation:");
-    println!("   render_size: ({:.1}, {:.1})", render_size.width, render_size.height);
-    println!("   image_size: ({:.1}, {:.1})", image_size.width, image_size.height);
-    println!("   viewport: zoom={:.3}, pan=[{:.1}, {:.1}]", viewport.zoom, viewport.pan_offset[0], viewport.pan_offset[1]);
-    for (i, ((sx, sy), (ix, iy))) in corners_screen.iter().zip(corners_image.iter()).enumerate() {
-        println!("   Corner {}: screen ({:.1}, {:.1}) -> image ({:.1}, {:.1})", i, sx, sy, ix, iy);
-    }
-    
-    // Step 3: Calculate AABB in image space
+
+    let corners_image: Vec<_> = corners_screen
+        .iter()
+        .map(|(sx, sy)| screen_to_image(*sx, *sy, viewport, render_size))
+        .collect();
+
     let min_x = corners_image.iter().map(|(x, _)| *x).fold(f32::INFINITY, f32::min);
     let max_x = corners_image.iter().map(|(x, _)| *x).fold(f32::NEG_INFINITY, f32::max);
     let min_y = corners_image.iter().map(|(_, y)| *y).fold(f32::INFINITY, f32::min);
     let max_y = corners_image.iter().map(|(_, y)| *y).fold(f32::NEG_INFINITY, f32::max);
-    
-    // Step 4: Convert to tile indices accounting for LOD
+
     let lod_scale = 2_u32.pow(lod) as f32;
     let effective_tile_size = tile_size as f32 * lod_scale;
-    
+
     let min_tx = (min_x / effective_tile_size).floor() as i32;
     let max_tx = (max_x / effective_tile_size).ceil() as i32;
     let min_ty = (min_y / effective_tile_size).floor() as i32;
     let max_ty = (max_y / effective_tile_size).ceil() as i32;
-    
-    println!("🔍 Tile calculation debug:");
-    println!("   Image AABB: ({:.1}, {:.1}) to ({:.1}, {:.1})", min_x, min_y, max_x, max_y);
-    println!("   Effective tile size: {:.1}", effective_tile_size);
-    println!("   Tile indices: tx=[{}, {}), ty=[{}, {})", min_tx, max_tx, min_ty, max_ty);
-    
-    // Generate list of visible tile coordinates
+
+    let mut visible_tiles = Vec::new();
     for ty in min_ty..max_ty {
         for tx in min_tx..max_tx {
-            // Ensure tiles are within image bounds
             if is_tile_in_bounds(tx, ty, lod, image_size, tile_size) {
-                visible_tiles.push(TileCoord {
-                    x: tx as u32,
-                    y: ty as u32,
-                    lod,
-                });
+                visible_tiles.push(TileCoord { x: tx as u32, y: ty as u32, lod });
             }
         }
     }
-    
     visible_tiles
 }
 
@@ -181,47 +126,34 @@ fn is_tile_in_bounds(tx: i32, ty: i32, lod: u32, image_size: ImageSize, tile_siz
     if tx < 0 || ty < 0 {
         return false;
     }
-    
     let lod_scale = 2_u32.pow(lod) as f32;
-    let effective_image_width = image_size.width / lod_scale;
-    let effective_image_height = image_size.height / lod_scale;
-    let effective_tile_size = tile_size as f32;
-    
-    let max_tiles_x = (effective_image_width / effective_tile_size).ceil() as u32;
-    let max_tiles_y = (effective_image_height / effective_tile_size).ceil() as u32;
-    
+    let max_tiles_x = (image_size.width / lod_scale / tile_size as f32).ceil() as u32;
+    let max_tiles_y = (image_size.height / lod_scale / tile_size as f32).ceil() as u32;
     (tx as u32) < max_tiles_x && (ty as u32) < max_tiles_y
 }
 
-/// Calculate image screen extent following pipeline spec
-pub fn calculate_image_screen_extent(
+/// Create M_image_to_ndc matrix
+pub fn create_image_to_ndc_matrix(
     viewport: &Viewport,
     render_size: RenderSize,
-    image_size: ImageSize,
-) -> ImageScreenExtent {
-    let render_center_x = render_size.width / 2.0;
-    let render_center_y = render_size.height / 2.0;
-    let image_center_x = image_size.width / 2.0;
-    let image_center_y = image_size.height / 2.0;
-    
-    let zoom_inv = 1.0 / viewport.zoom;
-    let pan_in_image_x = -viewport.pan_offset[0] * zoom_inv;
-    let pan_in_image_y = viewport.pan_offset[1] * zoom_inv;
-    
-    let center_x = image_center_x + pan_in_image_x;
-    let center_y = image_center_y + pan_in_image_y;
-    
-    // Transform image corners to screen coordinates
-    let image_min_x = ((0.0 - center_x) * viewport.zoom + render_center_x).round() as i32;
-    let image_min_y = ((0.0 - center_y) * viewport.zoom + render_center_y).round() as i32;
-    let image_max_x = ((image_size.width - center_x) * viewport.zoom + render_center_x).round() as i32;
-    let image_max_y = ((image_size.height - center_y) * viewport.zoom + render_center_y).round() as i32;
-    
-    ImageScreenExtent {
-        min: [image_min_x, image_min_y],
-        max: [image_max_x, image_max_y],
-    }
+) -> [[f32; 4]; 4] {
+    let scale_x = (2.0 * viewport.zoom) / render_size.width;
+    let scale_y = (2.0 * viewport.zoom) / render_size.height;
+
+    // Translate by -center_on_image and then scale
+    let translate_x = -viewport.center_on_image[0] * scale_x;
+    let translate_y = -viewport.center_on_image[1] * scale_y;
+
+    // Column-major matrix for WGSL
+    [
+        [scale_x, 0.0, 0.0, 0.0],
+        [0.0, scale_y, 0.0, 0.0],
+        [0.0, 0.0, 1.0, 0.0],
+        [translate_x, translate_y, 0.0, 1.0],
+    ]
 }
+
+// Functions below are for testing and debugging, might need updates
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ImageScreenExtent {
@@ -237,75 +169,45 @@ pub fn generate_visibility_mask(
     tile_size: u32,
 ) -> Vec<String> {
     let lod_scale = 2_u32.pow(lod) as f32;
-    let effective_image_width = image_size.width / lod_scale;
-    let effective_image_height = image_size.height / lod_scale;
-    let effective_tile_size = tile_size as f32;
-    
-    let max_tiles_x = (effective_image_width / effective_tile_size).ceil() as u32;
-    let max_tiles_y = (effective_image_height / effective_tile_size).ceil() as u32;
-    
-    // Create set of visible tile coordinates for fast lookup
-    let visible_set: std::collections::HashSet<(u32, u32)> = visible_tiles
-        .iter()
-        .map(|tile| (tile.x, tile.y))
-        .collect();
-    
-    // Generate mask rows (top to bottom)
+    let max_tiles_x = (image_size.width / lod_scale / tile_size as f32).ceil() as u32;
+    let max_tiles_y = (image_size.height / lod_scale / tile_size as f32).ceil() as u32;
+
+    let visible_set: std::collections::HashSet<(u32, u32)> = visible_tiles.iter().map(|t| (t.x, t.y)).collect();
+
     let mut mask_rows = Vec::new();
-    for ty in (0..max_tiles_y).rev() {  // Top to bottom
-        let mut row = String::new();
-        for tx in 0..max_tiles_x {
-            if visible_set.contains(&(tx, ty)) {
-                row.push('1');
-            } else {
-                row.push('0');
-            }
-        }
+    for ty in (0..max_tiles_y).rev() {
+        let row: String = (0..max_tiles_x)
+            .map(|tx| if visible_set.contains(&(tx, ty)) { '1' } else { '0' })
+            .collect();
         mask_rows.push(row);
     }
-    
     mask_rows
 }
 
-/// Create M_image_to_ndc matrix - simplified version that properly centers the image
-pub fn create_image_to_ndc_matrix(
+/// Calculate image screen extent
+pub fn calculate_image_screen_extent(
     viewport: &Viewport,
     render_size: RenderSize,
     image_size: ImageSize,
-) -> [[f32; 4]; 4] {
-    // Calculate scale to fit image in viewport with zoom
+) -> ImageScreenExtent {
     let scale_x = (2.0 * viewport.zoom) / render_size.width;
     let scale_y = (2.0 * viewport.zoom) / render_size.height;
-    
-    // Calculate translation to center the image at NDC origin (0,0)
-    // We need to translate by -image_center in image space, then apply scale
-    let image_center_x = image_size.width * 0.5;
-    let image_center_y = image_size.height * 0.5;
-    
-    // Translate to center the image at NDC origin (0,0), then apply pan offset
-    let translate_x = -image_center_x * scale_x + viewport.pan_offset[0];
-    let translate_y = -image_center_y * scale_y + viewport.pan_offset[1];
-    
-    // Matrix in column-major format for WGSL
-    [
-        [scale_x, 0.0, 0.0, 0.0],
-        [0.0, scale_y, 0.0, 0.0],
-        [0.0, 0.0, 1.0, 0.0],
-        [translate_x, translate_y, 0.0, 1.0],
-    ]
-}
 
-/// Matrix multiplication helper (column-major)
-fn multiply_matrices(a: &[[f32; 4]; 4], b: &[[f32; 4]; 4]) -> [[f32; 4]; 4] {
-    let mut result = [[0.0; 4]; 4];
-    for i in 0..4 {
-        for j in 0..4 {
-            for k in 0..4 {
-                result[i][j] += a[i][k] * b[k][j];
-            }
-        }
+    let image_to_screen = |ix: f32, iy: f32| {
+        let ndc_x = (ix - viewport.center_on_image[0]) * scale_x;
+        let ndc_y = (iy - viewport.center_on_image[1]) * scale_y;
+        let sx = (ndc_x + 1.0) * render_size.width / 2.0;
+        let sy = (ndc_y + 1.0) * render_size.height / 2.0;
+        (sx.round() as i32, sy.round() as i32)
+    };
+
+    let (min_sx, min_sy) = image_to_screen(0.0, 0.0);
+    let (max_sx, max_sy) = image_to_screen(image_size.width, image_size.height);
+
+    ImageScreenExtent {
+        min: [min_sx, min_sy],
+        max: [max_sx, max_sy],
     }
-    result
 }
 
 #[cfg(test)]
@@ -314,32 +216,28 @@ mod tests {
 
     #[test]
     fn test_lod_calculation() {
-        assert_eq!(calculate_lod(1.0, 10), 0);  // zoom=1.0 -> LOD 0
-        assert_eq!(calculate_lod(0.5, 10), 1);  // zoom=0.5 -> LOD 1
-        assert_eq!(calculate_lod(0.25, 10), 2); // zoom=0.25 -> LOD 2
-        assert_eq!(calculate_lod(2.0, 10), 0);  // zoom=2.0 -> LOD 0 (clamped)
+        assert_eq!(calculate_lod(1.0, 10), 0);
+        assert_eq!(calculate_lod(0.5, 10), 1);
+        assert_eq!(calculate_lod(0.25, 10), 2);
+        assert_eq!(calculate_lod(2.0, 10), 0);
     }
 
     #[test]
     fn test_max_lod_calculation() {
         let image_size = ImageSize { width: 2048.0, height: 2048.0 };
-        let max_lod = calculate_max_lod(image_size, 256);
-        assert_eq!(max_lod, 3); // floor(log2(2048/256)) = floor(3.0) = 3
-        
+        assert_eq!(calculate_max_lod(image_size, 256), 3);
         let small_image = ImageSize { width: 200.0, height: 200.0 };
-        let max_lod_small = calculate_max_lod(small_image, 256);
-        assert_eq!(max_lod_small, 0); // Image smaller than tile
+        assert_eq!(calculate_max_lod(small_image, 256), 0);
     }
 
     #[test]
     fn test_screen_to_image_identity() {
-        let viewport = Viewport::default();
+        let mut viewport = Viewport::default();
         let render_size = RenderSize { width: 800.0, height: 600.0 };
-        let image_size = ImageSize { width: 800.0, height: 600.0 };
-        
-        // Center of screen should map to center of image
-        let (ix, iy) = screen_to_image(400.0, 300.0, &viewport, render_size, image_size);
-        assert!((ix - 400.0).abs() < 0.001);
-        assert!((iy - 300.0).abs() < 0.001);
+        viewport.center_on_image = [400.0, 300.0]; // Center of image
+
+        let (ix, iy) = screen_to_image(400.0, 300.0, &viewport, render_size);
+        assert!((ix - 400.0).abs() < 1e-3);
+        assert!((iy - 300.0).abs() < 1e-3);
     }
 }
