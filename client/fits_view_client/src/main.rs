@@ -1328,13 +1328,14 @@ mod tests {
         let mut viewport = Viewport::default();
         viewport.zoom = 2.0;
         
-        let render_size = egui::Vec2::new(800.0, 600.0);
-        let image_size = egui::Vec2::new(400.0, 300.0);
-        let visible_tiles = viewport.get_visible_tiles(render_size, image_size, 256);
+        let render_size = RenderSize { width: 800.0, height: 600.0 };
+        let image_size = ImageSize { width: 400.0, height: 300.0 };
+        let max_lod = calculate_max_lod(image_size, 256);
+        let visible_tiles = calculate_visible_tiles(&viewport, render_size, image_size, 256, max_lod);
         
         // Debug output for tile visibility
         if visible_tiles.len() != 4 {
-            println!("🔍 Visible tiles: {} (loaded: 4)", visible_tiles.len());
+            println!("🔍 Visible tiles: {} (expected: 4)", visible_tiles.len());
             println!("   Viewport: zoom={:.3}, pan={:?}", viewport.zoom, viewport.pan_offset);
         }
         
@@ -1343,7 +1344,9 @@ mod tests {
             // Do nothing
         }
         
-        let matrix = viewport.to_transform_matrix(render_size, image_size);
+        let render_size_egui = egui::Vec2::new(800.0, 600.0);
+        let image_size_egui = egui::Vec2::new(400.0, 300.0);
+        let matrix = viewport.to_transform_matrix(render_size_egui, image_size_egui);
         
         // With 2x zoom, scaling should be doubled
         let expected_scale_x = 2.0 * 400.0 * 2.0 / 800.0; // 2.0

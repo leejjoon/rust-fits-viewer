@@ -120,6 +120,14 @@ pub fn calculate_visible_tiles(
         corners_image.push((ix, iy));
     }
     
+    println!("🔍 Screen to image transformation:");
+    println!("   render_size: ({:.1}, {:.1})", render_size.width, render_size.height);
+    println!("   image_size: ({:.1}, {:.1})", image_size.width, image_size.height);
+    println!("   viewport: zoom={:.3}, pan=[{:.1}, {:.1}]", viewport.zoom, viewport.pan_offset[0], viewport.pan_offset[1]);
+    for (i, ((sx, sy), (ix, iy))) in corners_screen.iter().zip(corners_image.iter()).enumerate() {
+        println!("   Corner {}: screen ({:.1}, {:.1}) -> image ({:.1}, {:.1})", i, sx, sy, ix, iy);
+    }
+    
     // Step 3: Calculate AABB in image space
     let min_x = corners_image.iter().map(|(x, _)| *x).fold(f32::INFINITY, f32::min);
     let max_x = corners_image.iter().map(|(x, _)| *x).fold(f32::NEG_INFINITY, f32::max);
@@ -134,6 +142,11 @@ pub fn calculate_visible_tiles(
     let max_tx = (max_x / effective_tile_size).ceil() as i32;
     let min_ty = (min_y / effective_tile_size).floor() as i32;
     let max_ty = (max_y / effective_tile_size).ceil() as i32;
+    
+    println!("🔍 Tile calculation debug:");
+    println!("   Image AABB: ({:.1}, {:.1}) to ({:.1}, {:.1})", min_x, min_y, max_x, max_y);
+    println!("   Effective tile size: {:.1}", effective_tile_size);
+    println!("   Tile indices: tx=[{}, {}), ty=[{}, {})", min_tx, max_tx, min_ty, max_ty);
     
     // Generate list of visible tile coordinates
     for ty in min_ty..max_ty {
