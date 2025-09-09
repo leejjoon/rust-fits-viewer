@@ -71,23 +71,34 @@ pub fn screen_to_image(
     render_size: RenderSize,
     image_size: ImageSize,
 ) -> (f32, f32) {
-    let render_center_x = render_size.width / 2.0;
-    let render_center_y = render_size.height / 2.0;
+    // Step 1: Convert screen coordinates to NDC (-1 to +1)
+    // (0,0) in screen space is top-left, but for calculations we use bottom-left as origin.
+    // The rendering setup uses a Y-up convention, so we must account for that here.
+    // In `main.rs`, mouse Y is inverted for panning, and screen_y for zoom-to-cursor is calculated from top.
+    // Let's assume screen_y comes in with Y-down (top-left origin).
+    let ndc_x = (screen_x / render_size.width) * 2.0 - 1.0;
+    let ndc_y = (screen_y / render_size.height) * 2.0 - 1.0;
+
+    // Step 2: Invert the transformation from `create_image_to_ndc_matrix`
+    // The forward transformation is:
+    // ndc = (image_pos - image_center) * scale + pan
+    // So, the inverse is:
+    // image_pos = (ndc - pan) / scale + image_center
+
+    let scale_x = (2.0 * viewport.zoom) / render_size.width;
+    let scale_y = (2.0 * viewport.zoom) / render_size.height;
+
     let image_center_x = image_size.width / 2.0;
     let image_center_y = image_size.height / 2.0;
-    
-    // Inverse zoom and pan calculations
-    let zoom_inv = 1.0 / viewport.zoom;
-    let pan_in_image_x = -viewport.pan_offset[0] * zoom_inv;
-    let pan_in_image_y = viewport.pan_offset[1] * zoom_inv;
-    
-    let center_x = image_center_x + pan_in_image_x;
-    let center_y = image_center_y + pan_in_image_y;
-    
-    // Transform screen to image coordinates
-    let ix = (screen_x - render_center_x) * zoom_inv + center_x;
-    let iy = (screen_y - render_center_y) * zoom_inv + center_y;
-    
+
+    // The pan offset is in NDC space.
+    let pan_offset_x = viewport.pan_offset[0];
+    let pan_offset_y = viewport.pan_offset[1];
+
+    // Apply the inverse transformation
+    let ix = (ndc_x - pan_offset_x) / scale_x + image_center_x;
+    let iy = (ndc_y - pan_offset_y) / scale_y + image_center_y;
+
     (ix, iy)
 }
 

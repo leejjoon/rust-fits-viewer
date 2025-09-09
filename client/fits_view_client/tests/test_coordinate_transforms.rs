@@ -109,16 +109,25 @@ fn test_screen_to_image_transform() {
     let viewport = Viewport::default();
     let render_size = RenderSize { width: 800.0, height: 600.0 };
     let image_size = ImageSize { width: 800.0, height: 600.0 };
-    
-    // Center of screen should map to center of image
+
+    // Center of screen should map to center of image with no pan
     let (ix, iy) = screen_to_image(400.0, 300.0, &viewport, render_size, image_size);
     assert!((ix - 400.0).abs() < 0.001, "Expected ix=400, got {}", ix);
     assert!((iy - 300.0).abs() < 0.001, "Expected iy=300, got {}", iy);
-    
-    // Test with pan offset
+
+    // Test with a reasonable NDC pan offset
     let mut viewport_panned = Viewport::default();
-    viewport_panned.pan_offset = [100.0, 50.0];
+    viewport_panned.pan_offset = [0.1, 0.2]; // Small pan right and up in NDC space
+
     let (ix_pan, iy_pan) = screen_to_image(400.0, 300.0, &viewport_panned, render_size, image_size);
-    assert!((ix_pan - 300.0).abs() < 0.001, "Expected ix_pan=300, got {}", ix_pan);
-    assert!((iy_pan - 350.0).abs() < 0.001, "Expected iy_pan=350, got {}", iy_pan);
+
+    // With zoom=1 and same image/render size, scale is 1.0 in image pixels per screen pixel.
+    // NDC pan of 0.1 is 0.1 * (render_width/2) = 40 screen pixels.
+    // So image should be shifted left by 40 pixels.
+    let expected_ix = 400.0 - 0.1 * (render_size.width / 2.0);
+    // Positive NDC pan Y moves image up, so center maps to a lower image Y.
+    let expected_iy = 300.0 - 0.2 * (render_size.height / 2.0);
+
+    assert!((ix_pan - expected_ix).abs() < 0.001, "Expected ix_pan={}, got {}", expected_ix, ix_pan);
+    assert!((iy_pan - expected_iy).abs() < 0.001, "Expected iy_pan={}, got {}", expected_iy, iy_pan);
 }

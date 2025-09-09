@@ -154,23 +154,30 @@ class TestCaseGenerator:
         
         This is the inverse of the Image → Screen transformation described in section 2.3.
         """
-        render_center_x = self.render_size[0] / 2.0
-        render_center_y = self.render_size[1] / 2.0
+        # Step 1: Convert screen coordinates to NDC (-1 to +1)
+        # Assumes sx, sy are relative to a Y-up viewport (origin at bottom-left)
+        ndc_x = (sx / self.render_size[0]) * 2.0 - 1.0
+        ndc_y = (sy / self.render_size[1]) * 2.0 - 1.0
+
+        # Step 2: Invert the transformation from the Rust code
+        # The forward transformation is:
+        # ndc = (image_pos - image_center) * scale + pan
+        # So, the inverse is:
+        # image_pos = (ndc - pan) / scale + image_center
+
+        scale_x = (2.0 * zoom) / self.render_size[0]
+        scale_y = (2.0 * zoom) / self.render_size[1]
+
         image_center_x = self.image_size[0] / 2.0
         image_center_y = self.image_size[1] / 2.0
-        
-        # Inverse zoom and pan calculations
-        zoom_inv = 1.0 / zoom
-        pan_in_image_x = -pan_offset[0] * zoom_inv
-        pan_in_image_y = pan_offset[1] * zoom_inv
-        
-        center_x = image_center_x + pan_in_image_x
-        center_y = image_center_y + pan_in_image_y
-        
-        # Transform screen to image coordinates
-        ix = (sx - render_center_x) * zoom_inv + center_x
-        iy = (sy - render_center_y) * zoom_inv + center_y
-        
+
+        pan_offset_x = pan_offset[0]
+        pan_offset_y = pan_offset[1]
+
+        # Apply the inverse transformation
+        ix = (ndc_x - pan_offset_x) / scale_x + image_center_x
+        iy = (ndc_y - pan_offset_y) / scale_y + image_center_y
+
         return (ix, iy)
     
     def _calculate_max_lod(self) -> int:
