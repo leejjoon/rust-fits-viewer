@@ -23,13 +23,17 @@ struct Args {
     #[arg(long, default_value = "http://127.0.0.1:8001")]
     backend_url: String,
     
-    /// Initial pan offset X in NDC space (for testing) - positive = right
+    /// Initial pan offset X in image pixel coordinates (for testing) - positive = right
     #[arg(long, default_value = "0.0")]
     initial_pan_x: f32,
     
-    /// Initial pan offset Y in NDC space (for testing) - positive = up
+    /// Initial pan offset Y in image pixel coordinates (for testing) - positive = down
     #[arg(long, default_value = "0.0")]
     initial_pan_y: f32,
+    
+    /// Initial zoom level (for testing) - 1.0 = fit to window
+    #[arg(long, default_value = "1.0")]
+    initial_zoom: f32,
 }
 
 // Simple viewport struct for main.rs
@@ -471,6 +475,7 @@ struct FitsViewApp {
     renderer: Option<Custom3d>,
     backend_url: String,
     viewport: SimpleViewport,
+    original_pan_pixels: Option<egui::Vec2>, // Store original pixel input for display
 }
 
 impl Default for FitsViewApp {
@@ -480,30 +485,41 @@ impl Default for FitsViewApp {
             renderer: None,
             backend_url: "http://127.0.0.1:8001".to_string(),
             viewport: SimpleViewport::default(),
+            original_pan_pixels: None,
         }
     }
 }
 
 impl FitsViewApp {
-    fn new(cc: &eframe::CreationContext<'_>, backend_url: String, initial_pan: Option<egui::Vec2>) -> Self {
+    fn new(cc: &eframe::CreationContext<'_>, backend_url: String, initial_pan_pixels: Option<egui::Vec2>, initial_zoom: f32) -> Self {
         let meta = fetch_meta(&backend_url);
         let renderer = {
             let wgpu_render_state = cc.wgpu_render_state.as_ref().expect("wgpu backend");
-            Some(Custom3d::new(wgpu_render_state, backend_url.clone(), meta.as_ref()))
+            let device = &wgpu_render_state.device;
+            let queue = &wgpu_render_state.queue;
+            let target_format = wgpu_render_state.target_format;
+            
+            Custom3d::new(&wgpu_render_state, backend_url.clone(), meta.as_ref())
         };
         
-        // Initialize viewport
         let mut viewport = SimpleViewport::default();
         if let Some(meta) = &meta {
-            // Use a reasonable default window size for initial centering
-            let window_size = egui::Vec2::new(800.0, 600.0);
-            let image_size = egui::Vec2::new(meta.shape[0] as f32, meta.shape[1] as f32);
+            let window_size = egui::Vec2::new(800.0, 600.0); // Default window size
+            let image_size = egui::Vec2::new(meta.shape[1] as f32, meta.shape[0] as f32);
             viewport.fit_to_window(window_size, image_size);
             
+            // Apply initial zoom if provided (for testing)
+            if initial_zoom != 1.0 {
+                viewport.zoom = initial_zoom;
+                println!("🎯 Applied initial zoom: {:.3}", initial_zoom);
+            }
+            
             // Apply initial pan offset if provided (for testing)
-            if let Some(pan) = initial_pan {
-                viewport.set_pan_offset(pan);
-                println!("🎯 Applied initial pan offset: {:?}", pan);
+            // Convert from image pixel coordinates to NDC
+            if let Some(pan_pixels) = initial_pan_pixels {
+                let ndc_pan = Self::convert_pixel_pan_to_ndc(pan_pixels, viewport.zoom, window_size, image_size);
+                viewport.set_pan_offset(ndc_pan);
+                println!("🎯 Applied initial pan offset: {:?} pixels -> {:?} NDC", pan_pixels, ndc_pan);
             }
             
             println!("🎯 Initial viewport setup:");
@@ -513,7 +529,51 @@ impl FitsViewApp {
             println!("   Initial pan: {:?}", viewport.pan_offset);
         }
         
-        Self { meta, renderer, backend_url, viewport }
+        Self { meta, renderer: Some(renderer), backend_url, viewport, original_pan_pixels: initial_pan_pixels }
+    }
+    
+    /// Convert pan offset from image pixel coordinates to NDC
+    fn convert_pixel_pan_to_ndc(
+        pan_pixels: egui::Vec2, 
+        zoom: f32, 
+        render_size: egui::Vec2, 
+        image_size: egui::Vec2
+    ) -> egui::Vec2 {
+        // Convert pixel pan to NDC using the inverse of the coordinate transform
+        // pan_in_image = -pan_offset_ndc * zoom_inv
+        // Therefore: pan_offset_ndc = -pan_in_image * zoom
+        
+        // Scale by zoom and convert to NDC space
+        let scale_x = (2.0 * zoom) / render_size.x;
+        let scale_y = (2.0 * zoom) / render_size.y;
+        
+        // Convert pixel coordinates to NDC
+        let ndc_x = pan_pixels.x * scale_x;
+        let ndc_y = -pan_pixels.y * scale_y; // Flip Y axis (pixel Y down -> NDC Y up)
+        
+        egui::Vec2::new(ndc_x, ndc_y)
+    }
+    
+    /// Convert pan offset from NDC back to image pixel coordinates for display
+    /// This should match the coordinate system used in JSON test files
+    fn convert_ndc_pan_to_pixels(&self) -> egui::Vec2 {
+        // Always convert current NDC pan back to pixel coordinates for display
+        // This ensures the display updates dynamically with mouse interactions
+        
+        // Use a standard render size for consistent coordinate conversion
+        // This matches the coordinate system used in JSON test files
+        let render_size = egui::Vec2::new(800.0, 600.0);
+        
+        // Invert the forward transformation:
+        // Forward: ndc_x = pan_pixels.x * scale_x, ndc_y = -pan_pixels.y * scale_y
+        // Inverse: pan_pixels.x = ndc_x / scale_x, pan_pixels.y = -ndc_y / scale_y
+        let scale_x = (2.0 * self.viewport.zoom) / render_size.x;
+        let scale_y = (2.0 * self.viewport.zoom) / render_size.y;
+        
+        let pan_in_image_x = self.viewport.pan_offset.x / scale_x;
+        let pan_in_image_y = -self.viewport.pan_offset.y / scale_y;
+        
+        egui::Vec2::new(pan_in_image_x, pan_in_image_y)
     }
     
     fn handle_input(&mut self, response: &egui::Response, ctx: &egui::Context, frame: &mut eframe::Frame) {
@@ -763,11 +823,14 @@ impl eframe::App for FitsViewApp {
                 0
             };
             
-            ui.label(format!("Zoom: {:.2}x, Pan: ({:.1}, {:.1}), Rotation: {:.1}°, LOD: {}", 
+            // Convert current NDC pan to image pixel coordinates for display
+            let pan_pixels = self.convert_ndc_pan_to_pixels();
+            
+            ui.label(format!("Zoom: {:.2}x, Pan: ({:.1}, {:.1}) px, Rotation: {:.1}°, LOD: {}", 
                 self.viewport.zoom, 
-                self.viewport.pan_offset.x, 
-                self.viewport.pan_offset.y, 
-                self.viewport.rotation_angle.to_degrees(),
+                pan_pixels.x, 
+                pan_pixels.y, 
+                self.viewport.rotation_angle, 
                 current_lod));
             
             ui.separator();
@@ -786,6 +849,7 @@ impl eframe::App for FitsViewApp {
                 let meta_prepare = meta.clone();
                 let viewport_paint = viewport.clone();
                 let meta_paint = meta.clone();
+                let original_pan_pixels = self.original_pan_pixels;
                 
                 let callback_fn = egui_wgpu::CallbackFn::new()
                     .prepare(move |device, queue, _encoder, resources| {
@@ -864,7 +928,14 @@ impl eframe::App for FitsViewApp {
                         println!("  render_size: [{:.0}, {:.0}]", render_size.x, render_size.y);
                         println!("  image_size: [{:.0}, {:.0}]", image_size_for_transform.width, image_size_for_transform.height);
                         println!("  zoom: {:.3}", core_viewport.zoom);
-                        println!("  pan_offset: [{:.1}, {:.1}]", core_viewport.pan_offset[0], core_viewport.pan_offset[1]);
+                        // Display current pan values in the same coordinate system as JSON test files
+                        // Convert current NDC pan back to pixel coordinates for display using standard render size
+                        let standard_render_size = egui::Vec2::new(800.0, 600.0);
+                        let scale_x = (2.0 * core_viewport.zoom) / standard_render_size.x;
+                        let scale_y = (2.0 * core_viewport.zoom) / standard_render_size.y;
+                        let pan_pixel_x = core_viewport.pan_offset[0] / scale_x;
+                        let pan_pixel_y = -core_viewport.pan_offset[1] / scale_y;
+                        println!("  pan_offset: [{:.1}, {:.1}]", pan_pixel_x, pan_pixel_y);
                         println!("  tile_size: {}", resources.tile_manager.tile_size);
                         
                         // Calculate and display LOD
@@ -1151,11 +1222,12 @@ impl FitsViewApp {
             
             // Show current viewport info including LOD
             let current_lod = calculate_lod(self.viewport.zoom, calculate_max_lod(image_size, meta.tile_size));
+            let pan_pixels = self.convert_ndc_pan_to_pixels();
             let info_text = format!(
-                "Zoom: {:.3}\nPan: ({:.3}, {:.3})\nRotation: {:.3}°\nLOD: {}\nTiles: {}",
+                "Zoom: {:.3}\nPan: ({:.1}, {:.1}) px\nRotation: {:.3}°\nLOD: {}\nTiles: {}",
                 self.viewport.zoom,
-                self.viewport.pan_offset.x,
-                self.viewport.pan_offset.y,
+                pan_pixels.x,
+                pan_pixels.y,
                 self.viewport.rotation_angle.to_degrees(),
                 current_lod,
                 visible_tiles.len()
@@ -1188,14 +1260,15 @@ fn multiply_matrices(a: &[[f32; 4]; 4], b: &[[f32; 4]; 4]) -> [[f32; 4]; 4] {
 fn main() -> eframe::Result<()> {
     let args = Args::parse();
     let backend_url = args.backend_url.clone();
-    let initial_pan = egui::Vec2::new(args.initial_pan_x, args.initial_pan_y);
+    let initial_pan_pixels = egui::Vec2::new(args.initial_pan_x, args.initial_pan_y);
+    let initial_zoom = args.initial_zoom;
     
     let mut native_options = eframe::NativeOptions::default();
     native_options.renderer = eframe::Renderer::Wgpu;
     eframe::run_native(
         "FITS View",
         native_options,
-        Box::new(move |cc| Box::new(FitsViewApp::new(cc, backend_url, Some(initial_pan)))),
+        Box::new(move |cc| Box::new(FitsViewApp::new(cc, backend_url, Some(initial_pan_pixels), initial_zoom))),
     )
 }
 
