@@ -7,9 +7,28 @@ from header import RawTileHeader, RAW_HEADER_SIZE, DT_F32, ENDIAN_LITTLE
 
 router = APIRouter()
 
-# Create a global numpy array to simulate a FITS file
-IMAGE_DATA = np.arange(1024 * 1024, dtype=np.float32).reshape((1024, 1024))
-IMAGE_DATA = (IMAGE_DATA / IMAGE_DATA.max() * 255).astype(np.float32)
+# Create a global numpy array to simulate a FITS file with circular hole
+def create_image_with_hole():
+    # Create base gradient image
+    image = np.arange(1024 * 1024, dtype=np.float32).reshape((1024, 1024))
+    image = (image / image.max() * 255).astype(np.float32)
+    
+    # Create circular hole at center with radius = 1/3 of image size
+    center_y, center_x = 512, 512  # Center of 1024x1024 image
+    radius = 1024 // 3  # 1/3 of image size = ~341 pixels
+    
+    # Create coordinate grids
+    y, x = np.ogrid[:1024, :1024]
+    
+    # Calculate distance from center
+    distance = np.sqrt((x - center_x)**2 + (y - center_y)**2)
+    
+    # Set pixels within radius to 0 (black hole)
+    image[distance <= radius] = 0.0
+    
+    return image
+
+IMAGE_DATA = create_image_with_hole()
 TILE_SIZE = 256
 
 class MetaResponse(BaseModel):
@@ -35,25 +54,35 @@ def get_meta():
 
 
 def get_tile_numpy(z: int, x: int, y: int) -> np.ndarray:
-    # In a real implementation, this would slice a FITS file with downsampling
-    # For now, we just slice the global array
-    # Note: z is not used yet
+    # Handle LOD (Level of Detail) by downsampling the image
+    # LOD 0 = full resolution, LOD 1 = half resolution, etc.
     
-    # Validate tile coordinates are within image bounds
-    h, w = IMAGE_DATA.shape
+    # Calculate downsampling factor
+    downsample_factor = 2 ** z
+    
+    # Downsample the image for this LOD level
+    if z == 0:
+        # Full resolution
+        source_image = IMAGE_DATA
+    else:
+        # Downsample by taking every nth pixel
+        source_image = IMAGE_DATA[::downsample_factor, ::downsample_factor]
+    
+    # Validate tile coordinates are within downsampled image bounds
+    h, w = source_image.shape
     max_x = (w - 1) // TILE_SIZE  # Maximum valid x coordinate
     max_y = (h - 1) // TILE_SIZE  # Maximum valid y coordinate
     
     if x < 0 or y < 0 or x > max_x or y > max_y:
-        raise IndexError(f"Tile ({x},{y}) is out of bounds. Valid range: (0-{max_x}, 0-{max_y})")
+        raise IndexError(f"Tile ({x},{y}) at LOD {z} is out of bounds. Valid range: (0-{max_x}, 0-{max_y})")
     
-    # Calculate slice bounds
+    # Calculate slice bounds in the downsampled image
     y_start = y * TILE_SIZE
     y_end = min((y + 1) * TILE_SIZE, h)
     x_start = x * TILE_SIZE  
     x_end = min((x + 1) * TILE_SIZE, w)
     
-    tile_data = IMAGE_DATA[y_start:y_end, x_start:x_end]
+    tile_data = source_image[y_start:y_end, x_start:x_end]
     
     # Pad tile to full TILE_SIZE if it's at the edge
     if tile_data.shape != (TILE_SIZE, TILE_SIZE):
