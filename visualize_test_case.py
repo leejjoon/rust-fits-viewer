@@ -19,11 +19,14 @@ def calculate_tile_screen_aabb(tile_x, tile_y, tile_z, input_data):
     center_x = image_center_x + pan_in_image_x
     center_y = image_center_y + pan_in_image_y
 
-    tile_size_f = input_data['tile_size']
-    ix_min = tile_x * tile_size_f
-    iy_min = tile_y * tile_size_f
-    ix_max = (tile_x + 1) * tile_size_f
-    iy_max = (tile_y + 1) * tile_size_f
+    # Account for LOD: at LOD z, each tile covers 2^z times more area
+    lod_scale = 2 ** tile_z
+    effective_tile_size = input_data['tile_size'] * lod_scale
+    
+    ix_min = tile_x * effective_tile_size
+    iy_min = tile_y * effective_tile_size
+    ix_max = (tile_x + 1) * effective_tile_size
+    iy_max = (tile_y + 1) * effective_tile_size
 
     sx_min = int(round((ix_min - center_x) * input_data['zoom'] + render_center_x))
     sy_min = int(round((iy_min - center_y) * input_data['zoom'] + render_center_y))
@@ -69,7 +72,7 @@ def visualize_test_case(test_case, save_figure=False, fig=None):
             # The visibility mask is top-to-bottom, so we invert the row index
             tile_y = num_rows - 1 - r
             tile_x = c
-            tile_z = input_data['lod']
+            tile_z = output_data['lod']
             
             # Calculate the screen AABB for this tile
             aabb = calculate_tile_screen_aabb(tile_x, tile_y, tile_z, input_data)
@@ -130,7 +133,7 @@ def visualize_test_case(test_case, save_figure=False, fig=None):
             # The visibility mask is top-to-bottom, so we invert the row index
             tile_y = num_rows - 1 - r
             tile_x = c
-            tile_z = input_data['lod']
+            tile_z = output_data['lod']
             
             # Calculate the screen AABB for this tile
             aabb = calculate_tile_screen_aabb(tile_x, tile_y, tile_z, input_data)

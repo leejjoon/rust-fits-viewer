@@ -22,7 +22,7 @@ class TestCaseGenerator:
     4. Image Space → Tile Coordinates (determine which tiles are needed)
     """
     
-    def __init__(self, render_size: Tuple[float, float], image_size: Tuple[float, float], tile_size: int):
+    def __init__(self, render_size: Tuple[float, float], image_size: Tuple[float, float], tile_size: int, max_lod: int = None):
         """
         Initialize the test case generator.
         
@@ -30,16 +30,22 @@ class TestCaseGenerator:
             render_size: (width, height) of the render viewport in pixels
             image_size: (width, height) of the image in pixels  
             tile_size: Size of each tile in pixels (assumed square)
+            max_lod: Maximum LOD level to allow. If None, calculated automatically.
         """
         self.render_size = render_size
         self.image_size = image_size
         self.tile_size = tile_size
         
+        # Calculate or use provided max_lod
+        if max_lod is None:
+            self.max_lod = self._calculate_max_lod()
+        else:
+            self.max_lod = max_lod
+        
     def generate_test_case(self, 
                           name: str,
                           zoom: float = 1.0, 
-                          pan_offset: Tuple[float, float] = (0.0, 0.0),
-                          lod: int = 0) -> Dict[str, Any]:
+                          pan_offset: Tuple[float, float] = (0.0, 0.0)) -> Dict[str, Any]:
         """
         Generate a complete test case JSON object.
         
@@ -47,11 +53,13 @@ class TestCaseGenerator:
             name: Descriptive name for the test case
             zoom: Zoom factor (1.0 = no zoom, >1.0 = zoomed in, <1.0 = zoomed out)
             pan_offset: (x, y) pan offset in normalized coordinates
-            lod: Level of Detail (0 = full resolution, 1 = half resolution, etc.)
             
         Returns:
             Dictionary containing the complete test case data
         """
+        
+        # Calculate LOD based on zoom level (result, not input)
+        lod = self._calculate_lod(zoom)
         
         # Calculate padded area (half tile size padding on each side)
         padding = self.tile_size * 0.5
@@ -78,10 +86,10 @@ class TestCaseGenerator:
                 "image_size": list(self.image_size),
                 "zoom": zoom,
                 "pan_offset": list(pan_offset),
-                "tile_size": self.tile_size,
-                "lod": lod
+                "tile_size": self.tile_size
             },
             "output": {
+                "lod": lod,
                 "padded_area": padded_area,
                 "visibility_mask": visibility_mask,
                 "image_screen_extent": image_screen_extent
@@ -164,6 +172,64 @@ class TestCaseGenerator:
         iy = (sy - render_center_y) * zoom_inv + center_y
         
         return (ix, iy)
+    
+    def _calculate_max_lod(self) -> int:
+        """
+        Calculate the maximum useful LOD level based on image and tile size.
+        
+        The maximum LOD is determined by ensuring that the scaled image size
+        remains larger than the tile size. Beyond this point, the entire image
+        would fit in a single tile, making higher LODs unnecessary.
+        
+        Returns:
+            Maximum LOD level where scaled image > tile_size
+        """
+        # Find the smaller dimension to be conservative
+        min_image_dimension = min(self.image_size[0], self.image_size[1])
+        
+        # Calculate max LOD where scaled_image_size > tile_size
+        # At LOD z: effective_image_size = original_size / (2^z)
+        # We want: original_size / (2^z) > tile_size
+        # So: 2^z < original_size / tile_size
+        # Therefore: z < log2(original_size / tile_size)
+        
+        if min_image_dimension <= self.tile_size:
+            # Image is already smaller than tile size
+            return 0
+        
+        max_lod_float = math.log2(min_image_dimension / self.tile_size)
+        max_lod = int(math.floor(max_lod_float))
+        
+        # Ensure at least LOD 0 is available
+        return max(0, max_lod)
+    
+    def _calculate_lod(self, zoom: float) -> int:
+        """
+        Calculate the appropriate Level of Detail based on zoom level.
+        
+        Following the specification in fits_viewer_pipeline.md section 4.2:
+        z_ideal = -log2(zoom)
+        lod_to_request = round(z_ideal)
+        
+        LOD 0 = full resolution (1:1 scale)
+        LOD 1 = half resolution (1:2 scale) 
+        LOD 2 = quarter resolution (1:4 scale)
+        etc.
+        
+        Args:
+            zoom: Current zoom factor (s in the pipeline doc)
+            
+        Returns:
+            Appropriate LOD level (0, 1, 2, ...)
+        """
+        # Calculate ideal fractional LOD: z_ideal = -log2(zoom)
+        z_ideal = -math.log2(zoom)
+        
+        # Round to nearest integer to get concrete LOD level
+        lod_to_request = round(z_ideal)
+        
+        # Ensure LOD is within valid range [0, max_lod]
+        return max(0, min(lod_to_request, self.max_lod))
     
     def _is_tile_in_bounds(self, tx: int, ty: int, lod: int) -> bool:
         """Check if a tile coordinate is within the image bounds for the given LOD."""
@@ -251,8 +317,7 @@ def main():
     case1 = generator1.generate_test_case(
         name="Simple case: No zoom, no pan",
         zoom=1.0,
-        pan_offset=(0.0, 0.0),
-        lod=0
+        pan_offset=(0.0, 0.0)
     )
     
     # Test case 2: Larger image, no pan
@@ -265,32 +330,28 @@ def main():
     case2 = generator2.generate_test_case(
         name="Larger image, no pan", 
         zoom=1.0,
-        pan_offset=(0.0, 0.0),
-        lod=0
+        pan_offset=(0.0, 0.0)
     )
     
     # Test case 3: Zoomed in view
     case3 = generator2.generate_test_case(
         name="Zoomed-in view",
         zoom=2.0,
-        pan_offset=(0.0, 0.0),
-        lod=0
+        pan_offset=(0.0, 0.0)
     )
     
     # Test case 4: Panned view
     case4 = generator2.generate_test_case(
         name="Panned view",
         zoom=1.0,
-        pan_offset=(-0.5, -0.5),
-        lod=0
+        pan_offset=(-0.5, -0.5)
     )
     
-    # Test case 5: LOD 1 view
+    # Test case 5: LOD 1 view (zoom=0.5 will automatically calculate LOD=1)
     case5 = generator2.generate_test_case(
         name="LOD 1 view",
         zoom=0.5,
-        pan_offset=(0.0, 0.0),
-        lod=1
+        pan_offset=(0.0, 0.0)
     )
     
     # Save each test case to its own file
