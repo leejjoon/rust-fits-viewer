@@ -46,13 +46,16 @@ pub fn calculate_lod(zoom: f32, max_lod: u32) -> u32 {
 }
 
 /// Calculate maximum useful LOD level
+/// Ensures at least 2 LOD levels (0 and 1) for progressive loading
 pub fn calculate_max_lod(image_size: ImageSize, tile_size: u32) -> u32 {
     let min_dim = image_size.width.min(image_size.height);
     if min_dim <= tile_size as f32 {
-        return 0;
+        // For very small images, we'll still use LOD 0 and 1 for consistency
+        return 1;
     }
     let max_lod_float = (min_dim / tile_size as f32).log2();
-    (max_lod_float.floor() as u32).max(0)
+    // Ensure we have at least 2 LOD levels
+    (max_lod_float.floor() as u32).max(1)
 }
 
 /// Transform screen coordinates to image coordinates
@@ -81,9 +84,9 @@ pub fn calculate_visible_tiles(
     render_size: RenderSize,
     image_size: ImageSize,
     tile_size: u32,
-    max_lod: u32,
+    lod: u32,  // Changed from max_lod to lod since we want to use the specific LOD level
 ) -> Vec<TileCoord> {
-    let lod = calculate_lod(viewport.zoom, max_lod);
+    // Use the provided lod parameter directly instead of recalculating
     let padding = tile_size as f32 * 0.5;
     let corners_screen = [
         (-padding, -padding),
