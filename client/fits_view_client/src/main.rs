@@ -12,6 +12,8 @@ use fits_view_client::{
     create_image_to_ndc_matrix, calculate_max_lod, calculate_visible_tiles,
     tile_manager::{TileCoord},
 };
+use tokio::runtime::Runtime;
+use tokio::sync::mpsc::{self, UnboundedSender, UnboundedReceiver};
 
 #[derive(Parser)]
 #[command(author, version, about, long_about = None)]
@@ -84,18 +86,19 @@ impl Vertex {
         wgpu::VertexBufferLayout {
             array_stride: std::mem::size_of::<Vertex>() as wgpu::BufferAddress,
             step_mode: wgpu::VertexStepMode::Vertex,
-            attributes: &[
-                wgpu::VertexAttribute {
-                    offset: 0,
-                    shader_location: 0,
-                    format: wgpu::VertexFormat::Float32x2,
-                },
-                wgpu::VertexAttribute {
-                    offset: std::mem::size_of::<[f32; 2]>() as wgpu::BufferAddress,
-                    shader_location: 1,
-                    format: wgpu::VertexFormat::Float32x2,
-                },
-            ],
+            attributes: &
+                [
+                    wgpu::VertexAttribute {
+                        offset: 0,
+                        shader_location: 0,
+                        format: wgpu::VertexFormat::Float32x2,
+                    },
+                    wgpu::VertexAttribute {
+                        offset: std::mem::size_of::<[f32; 2]>() as wgpu::BufferAddress,
+                        shader_location: 1,
+                        format: wgpu::VertexFormat::Float32x2,
+                    },
+                ],
         }
     }
 }
@@ -122,14 +125,19 @@ struct Uniforms {
     _padding3: [f32; 4],
 }
 
-struct TileData {
+struct GpuTileData {
     _texture: wgpu::Texture,
     bind_group: wgpu::BindGroup,
-    _coord: TileCoord,
+}
+
+enum TileState {
+    Loading,
+    Loaded(GpuTileData),
+    Fallback(GpuTileData),
 }
 
 struct GpuTileManager {
-    tiles: std::collections::HashMap<TileCoord, TileData>,
+    tiles: std::collections::HashMap<TileCoord, TileState>,
     tile_size: u32,
 }
 
@@ -151,19 +159,27 @@ impl GpuTileManager {
         Self { tiles: std::collections::HashMap::new(), tile_size }
     }
 
-    fn get_or_create_tile(&mut self, coord: &TileCoord, device: &wgpu::Device, queue: &wgpu::Queue, backend_url: &str, texture_bind_group_layout: &wgpu::BindGroupLayout) -> Option<&TileData> {
-        if self.tiles.contains_key(coord) {
-            return self.tiles.get(coord);
+    fn get_tile<'a>(&'a mut self, coord: &TileCoord, runtime: &Runtime, backend_url: &str, tile_sender: &UnboundedSender<(TileCoord, Vec<f32>)>) -> &'a TileState {
+        if !self.tiles.contains_key(coord) {
+            self.tiles.insert(coord.clone(), TileState::Loading);
+            let backend_url = backend_url.to_string();
+            let coord = coord.clone();
+            let tile_sender = tile_sender.clone();
+            runtime.spawn(async move {
+                match fetch_tile_data(&backend_url, coord.lod, coord.x, coord.y).await {
+                    Ok(data) => {
+                        let _ = tile_sender.send((coord, data));
+                    }
+                    Err(e) => {
+                        println!("Failed to fetch tile ({}, {}, {}): {}", coord.lod, coord.x, coord.y, e);
+                    }
+                }
+            });
         }
+        self.tiles.get(coord).unwrap()
+    }
 
-        let f32_data = match fetch_tile_data(backend_url, coord.lod, coord.x, coord.y) {
-            Ok(data) => data,
-            Err(e) => {
-                println!("Failed to fetch tile ({}, {}, {}): {}, using fallback", coord.lod, coord.x, coord.y, e);
-                self.generate_fallback_tile()
-            }
-        };
-
+    fn upload_tile_data(&self, f32_data: &[f32], device: &wgpu::Device, queue: &wgpu::Queue, texture_bind_group_layout: &wgpu::BindGroupLayout) -> GpuTileData {
         let texture_size = wgpu::Extent3d { width: self.tile_size, height: self.tile_size, depth_or_array_layers: 1 };
         let texture = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("server_tile"),
@@ -178,7 +194,7 @@ impl GpuTileManager {
 
         queue.write_texture(
             wgpu::ImageCopyTexture { texture: &texture, mip_level: 0, origin: wgpu::Origin3d::ZERO, aspect: wgpu::TextureAspect::All },
-            bytemuck::cast_slice(&f32_data),
+            bytemuck::cast_slice(f32_data),
             wgpu::ImageDataLayout { offset: 0, bytes_per_row: Some(4 * self.tile_size), rows_per_image: Some(self.tile_size) },
             texture_size,
         );
@@ -187,26 +203,15 @@ impl GpuTileManager {
         let sampler = device.create_sampler(&wgpu::SamplerDescriptor { mag_filter: wgpu::FilterMode::Nearest, min_filter: wgpu::FilterMode::Nearest, ..Default::default() });
         let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
             layout: texture_bind_group_layout,
-            entries: &[
-                wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(&texture_view) },
-                wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::Sampler(&sampler) },
-            ],
-            label: Some(&format!("tile_{}_{}_{}", coord.lod, coord.x, coord.y)),
+            entries: &
+                [
+                    wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(&texture_view) },
+                    wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::Sampler(&sampler) },
+                ],
+            label: Some("tile_bind_group"),
         });
 
-        let tile_data = TileData { _texture: texture, bind_group, _coord: coord.clone() };
-        self.tiles.insert(coord.clone(), tile_data);
-        self.tiles.get(coord)
-    }
-
-    fn generate_fallback_tile(&self) -> Vec<f32> {
-        let mut data = vec![0.0f32; (self.tile_size * self.tile_size) as usize];
-        for y in 0..self.tile_size {
-            for x in 0..self.tile_size {
-                data[(y * self.tile_size + x) as usize] = if (x + y) % 2 == 0 { 255.0 } else { 0.0 };
-            }
-        }
-        data
+        GpuTileData { _texture: texture, bind_group }
     }
 }
 
@@ -216,40 +221,42 @@ impl Custom3d {
         let tile_manager = GpuTileManager::new(meta.tile_size);
 
         let texture_bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            entries: &[
-                wgpu::BindGroupLayoutEntry {
-                    binding: 0,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Texture {
-                        multisampled: false,
-                        view_dimension: wgpu::TextureViewDimension::D2,
-                        sample_type: wgpu::TextureSampleType::Float { filterable: false },
+            entries: &
+                [
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 0,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Texture {
+                            multisampled: false,
+                            view_dimension: wgpu::TextureViewDimension::D2,
+                            sample_type: wgpu::TextureSampleType::Float { filterable: false },
+                        },
+                        count: None,
                     },
-                    count: None,
-                },
-                wgpu::BindGroupLayoutEntry {
-                    binding: 1,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::NonFiltering),
-                    count: None,
-                },
-            ],
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 1,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::NonFiltering),
+                        count: None,
+                    },
+                ],
             label: Some("texture_bind_group_layout"),
         });
 
         let uniform_bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            entries: &[
-                wgpu::BindGroupLayoutEntry {
-                    binding: 0,
-                    visibility: wgpu::ShaderStages::VERTEX | wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Buffer {
-                        ty: wgpu::BufferBindingType::Uniform,
-                        has_dynamic_offset: true,
-                        min_binding_size: wgpu::BufferSize::new(std::mem::size_of::<Uniforms>() as u64),
+            entries: &
+                [
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 0,
+                        visibility: wgpu::ShaderStages::VERTEX | wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Uniform,
+                            has_dynamic_offset: true,
+                            min_binding_size: wgpu::BufferSize::new(std::mem::size_of::<Uniforms>() as u64),
+                        },
+                        count: None,
                     },
-                    count: None,
-                },
-            ],
+                ],
             label: Some("uniform_bind_group_layout"),
         });
 
@@ -275,11 +282,14 @@ impl Custom3d {
             fragment: Some(wgpu::FragmentState {
                 module: &shader,
                 entry_point: "fs_main",
-                targets: &[Some(wgpu::ColorTargetState {
-                    format: wgpu_render_state.target_format,
-                    blend: Some(wgpu::BlendState::REPLACE),
-                    write_mask: wgpu::ColorWrites::ALL,
-                })],
+                targets: &
+                    [
+                        Some(wgpu::ColorTargetState {
+                            format: wgpu_render_state.target_format,
+                            blend: Some(wgpu::BlendState::REPLACE),
+                            write_mask: wgpu::ColorWrites::ALL,
+                        }),
+                    ],
             }),
             primitive: wgpu::PrimitiveState::default(),
             depth_stencil: None,
@@ -305,16 +315,17 @@ impl Custom3d {
         });
         let uniform_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
             layout: &uniform_bind_group_layout,
-            entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
-                        buffer: &uniform_buffer,
-                        offset: 0,
-                        size: wgpu::BufferSize::new(std::mem::size_of::<Uniforms>() as u64),
-                    }),
-                },
-            ],
+            entries: &
+                [
+                    wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
+                            buffer: &uniform_buffer,
+                            offset: 0,
+                            size: wgpu::BufferSize::new(std::mem::size_of::<Uniforms>() as u64),
+                        }),
+                    },
+                ],
             label: Some("uniform_bind_group"),
         });
 
@@ -339,17 +350,14 @@ struct FitsViewApp {
     backend_url: String,
     viewport: SimpleViewport,
     show_debug_overlay: bool,
-}
-
-impl Default for FitsViewApp {
-    fn default() -> Self {
-        Self { meta: None, _renderer: None, backend_url: "http://127.0.0.1:8001".to_string(), viewport: SimpleViewport::default(), show_debug_overlay: false }
-    }
+    runtime: Arc<Runtime>,
+    tile_sender: UnboundedSender<(TileCoord, Vec<f32>)>, 
+    tile_receiver: UnboundedReceiver<(TileCoord, Vec<f32>)>, 
 }
 
 impl FitsViewApp {
     fn new(cc: &eframe::CreationContext<'_>, backend_url: String, initial_pan: egui::Vec2, initial_zoom: f32) -> Self {
-        let meta = fetch_meta(&backend_url);
+        let meta = fetch_meta_blocking(&backend_url);
         let _renderer = meta.as_ref().map(|m| Custom3d::new(cc.wgpu_render_state.as_ref().expect("wgpu backend"), m));
 
         let mut viewport = SimpleViewport::default();
@@ -360,7 +368,10 @@ impl FitsViewApp {
             viewport.center_on_image = image_size * 0.5 - initial_pan;
         }
 
-        Self { meta, _renderer, backend_url, viewport, show_debug_overlay: false }
+        let runtime = Arc::new(tokio::runtime::Builder::new_multi_thread().enable_all().build().unwrap());
+        let (tile_sender, tile_receiver) = mpsc::unbounded_channel();
+
+        Self { meta, _renderer, backend_url, viewport, show_debug_overlay: false, runtime, tile_sender, tile_receiver }
     }
 
     fn handle_input(&mut self, response: &egui::Response, ctx: &egui::Context, frame: &mut eframe::Frame) {
@@ -467,7 +478,7 @@ impl FitsViewApp {
             painter.rect_stroke(tile_rect, 0.0, egui::Stroke::new(1.0, egui::Color32::GREEN));
             
             // Draw tile coordinates
-            let text = format!("({},{},{})", tile_coord.x, tile_coord.y, tile_coord.lod);
+            let text = format!("({},{}, M{})", tile_coord.x, tile_coord.y, tile_coord.lod);
             painter.text(
                 tile_rect.center(),
                 egui::Align2::CENTER_CENTER,
@@ -479,7 +490,7 @@ impl FitsViewApp {
         
         // Draw debug info text
         let debug_text = format!(
-            "Debug Overlay (D to toggle)\nZoom: {:.2}x\nCenter: ({:.1}, {:.1})\nVisible Tiles: {}",
+            "Debug Overlay (D to toggle)\nZoom: {:.2}x\nCenter: ({:.1}, {:.1}) px\nVisible Tiles: {}",
             self.viewport.zoom,
             self.viewport.center_on_image.x,
             self.viewport.center_on_image.y,
@@ -506,6 +517,25 @@ fn screen_to_image_local(screen_pos: egui::Pos2, rect: &egui::Rect, viewport: &S
 
 impl eframe::App for FitsViewApp {
     fn update(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
+        let mut received_tiles = vec![];
+        while let Ok(tile) = self.tile_receiver.try_recv() {
+            received_tiles.push(tile);
+        }
+
+        if !received_tiles.is_empty() {
+            if let Some(wgpu_render_state) = frame.wgpu_render_state() {
+                let mut renderer = wgpu_render_state.renderer.write();
+                let resources: &mut Custom3dResources = renderer.paint_callback_resources.get_mut().unwrap();
+                for (coord, data) in received_tiles {
+                    let device = &wgpu_render_state.device;
+                    let queue = &wgpu_render_state.queue;
+                    let gpu_tile_data = resources.tile_manager.upload_tile_data(&data, device, queue, &resources.texture_bind_group_layout);
+                    resources.tile_manager.tiles.insert(coord, TileState::Loaded(gpu_tile_data));
+                }
+            }
+            ctx.request_repaint();
+        }
+
         egui::CentralPanel::default().show(ctx, |ui| {
             ui.heading("FITS View");
             if let Some(meta) = &self.meta {
@@ -535,36 +565,40 @@ impl eframe::App for FitsViewApp {
                 let meta_clone = meta.clone();
                 let visible_tiles_clone = visible_tiles.clone();
                 let visible_tiles_debug = visible_tiles.clone();
+                let tile_sender_clone = self.tile_sender.clone();
+                let runtime_clone = self.runtime.clone();
 
                 let callback = egui::PaintCallback {
                     rect,
                     callback: Arc::new(egui_wgpu::CallbackFn::new()
-                        .prepare(move |device, queue, _encoder, resources| {
+                        .prepare(move |_device, queue, _encoder, resources| {
                             let resources: &mut Custom3dResources = resources.get_mut().unwrap();
                             for tile_coord in &visible_tiles {
-                                resources.tile_manager.get_or_create_tile(tile_coord, device, queue, &backend_url_clone, &resources.texture_bind_group_layout);
+                                resources.tile_manager.get_tile(tile_coord, &runtime_clone, &backend_url_clone, &tile_sender_clone);
                             }
 
                             let mut tile_index = 0;
                             for tile_coord in &visible_tiles {
-                                if resources.tile_manager.tiles.contains_key(tile_coord) {
-                                    let lod_scale = 2_u32.pow(tile_coord.lod) as f32;
-                                    let effective_tile_size = resources.tile_manager.tile_size as f32 * lod_scale;
-                                    let tile_offset_x = tile_coord.x as f32 * effective_tile_size;
-                                    let tile_offset_y = tile_coord.y as f32 * effective_tile_size;
+                                if let Some(tile_state) = resources.tile_manager.tiles.get(tile_coord) {
+                                    if let TileState::Loaded(_) | TileState::Fallback(_) = tile_state {
+                                        let lod_scale = 2_u32.pow(tile_coord.lod) as f32;
+                                        let effective_tile_size = resources.tile_manager.tile_size as f32 * lod_scale;
+                                        let tile_offset_x = tile_coord.x as f32 * effective_tile_size;
+                                        let tile_offset_y = tile_coord.y as f32 * effective_tile_size;
 
-                                    let uniforms = Uniforms {
-                                        transform: transform_matrix,
-                                        tile_offset: [tile_offset_x, tile_offset_y],
-                                        vmin: meta_clone.min_val,
-                                        vmax: meta_clone.max_val,
-                                        tile_size: effective_tile_size,
-                                        _padding1: 0.0,
-                                        _padding2: [0.0, 0.0],
-                                        _padding3: [0.0, 0.0, 0.0, 0.0],
-                                    };
-                                    queue.write_buffer(&resources.uniform_buffer, (tile_index * 256) as u64, bytemuck::cast_slice(&[uniforms]));
-                                    tile_index += 1;
+                                        let uniforms = Uniforms {
+                                            transform: transform_matrix,
+                                            tile_offset: [tile_offset_x, tile_offset_y],
+                                            vmin: meta_clone.min_val,
+                                            vmax: meta_clone.max_val,
+                                            tile_size: effective_tile_size,
+                                            _padding1: 0.0,
+                                            _padding2: [0.0, 0.0],
+                                            _padding3: [0.0, 0.0, 0.0, 0.0],
+                                        };
+                                        queue.write_buffer(&resources.uniform_buffer, (tile_index * 256) as u64, bytemuck::cast_slice(&[uniforms]));
+                                        tile_index += 1;
+                                    }
                                 }
                             }
                             Vec::new()
@@ -577,11 +611,18 @@ impl eframe::App for FitsViewApp {
 
                             let mut tile_index = 0;
                             for tile_coord in &visible_tiles_clone {
-                                if let Some(tile_data) = resources.tile_manager.tiles.get(tile_coord) {
-                                    rpass.set_bind_group(0, &tile_data.bind_group, &[]);
-                                    rpass.set_bind_group(1, &resources.uniform_bind_group, &[(tile_index * 256) as u32]);
-                                    rpass.draw_indexed(0..resources.num_indices, 0, 0..1);
-                                    tile_index += 1;
+                                if let Some(tile_state) = resources.tile_manager.tiles.get(tile_coord) {
+                                    let bind_group = match tile_state {
+                                        TileState::Loaded(gpu_tile_data) => Some(&gpu_tile_data.bind_group),
+                                        TileState::Fallback(gpu_tile_data) => Some(&gpu_tile_data.bind_group),
+                                        TileState::Loading => None,
+                                    };
+                                    if let Some(bind_group) = bind_group {
+                                        rpass.set_bind_group(0, bind_group, &[]);
+                                        rpass.set_bind_group(1, &resources.uniform_bind_group, &[(tile_index * 256) as u32]);
+                                        rpass.draw_indexed(0..resources.num_indices, 0, 0..1);
+                                        tile_index += 1;
+                                    }
                                 }
                             }
                         })
@@ -589,7 +630,6 @@ impl eframe::App for FitsViewApp {
                 };
                 ui.painter().add(callback);
                 
-                // Draw debug overlay if enabled
                 if self.show_debug_overlay {
                     self.draw_debug_overlay(ui, rect, &visible_tiles_debug, meta);
                 }
@@ -604,18 +644,20 @@ fn main() -> eframe::Result<()> {
     eframe::run_native("FITS View", native_options, Box::new(move |cc| Box::new(FitsViewApp::new(cc, args.backend_url, egui::Vec2::new(args.initial_pan_x, args.initial_pan_y), args.initial_zoom))))
 }
 
-fn fetch_meta(backend_url: &str) -> Option<MetaResponse> {
+fn fetch_meta_blocking(backend_url: &str) -> Option<MetaResponse> {
     let url = format!("{}/meta", backend_url);
+    // Using a blocking call here for simplicity during initialization.
+    // In a real-world app, you might want to make this async as well and show a loading screen.
     match reqwest::blocking::get(url) {
         Ok(response) => response.json::<MetaResponse>().ok(),
         Err(_) => None,
     }
 }
 
-fn fetch_tile_data(backend_url: &str, z: u32, x: u32, y: u32) -> Result<Vec<f32>, Box<dyn std::error::Error>> {
+async fn fetch_tile_data(backend_url: &str, z: u32, x: u32, y: u32) -> Result<Vec<f32>, Box<dyn std::error::Error>> {
     let url = format!("{}/tile/{}/{}/{}?format=raw", backend_url, z, x, y);
-    let response = reqwest::blocking::get(url)?;
-    let bytes = response.bytes()?;
+    let response = reqwest::get(&url).await?;
+    let bytes = response.bytes().await?;
     let (_header, payload) = raw_header::RawTileHeader::from_prefix(&bytes)?;
     let f32_data: Vec<f32> = payload.chunks_exact(4).map(|c| f32::from_le_bytes([c[0],c[1],c[2],c[3]])).collect();
     Ok(f32_data)
