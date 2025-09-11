@@ -17,8 +17,9 @@ struct Uniforms {
     vmax: f32,
     tile_size: f32,
     _padding1: f32,
+    tex_coord_offset: vec2<f32>,
+    tex_coord_scale: vec2<f32>,
     _padding2: vec2<f32>,
-    _padding3: vec4<f32>,
 };
 
 @group(1) @binding(0)
@@ -29,8 +30,12 @@ fn vs_main(
     model: VertexInput,
 ) -> VertexOutput {
     var out: VertexOutput;
+    
     // Flip Y-axis for texture coordinates to correct tile orientation
-    out.tex_coords = vec2<f32>(model.tex_coords.x, 1.0 - model.tex_coords.y);
+    let flipped_coords = vec2<f32>(model.tex_coords.x, 1.0 - model.tex_coords.y);
+
+    // Apply fallback scaling and offset to the flipped texture coordinates
+    out.tex_coords = flipped_coords * uniforms.tex_coord_scale + uniforms.tex_coord_offset;
     
     // Scale the unit quad [0,1] to effective tile size and offset by tile position
     let tile_pos = model.position * uniforms.tile_size + uniforms.tile_offset;

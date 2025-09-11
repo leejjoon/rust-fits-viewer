@@ -122,8 +122,9 @@ struct Uniforms {
     vmax: f32,
     tile_size: f32,
     _padding1: f32,
+    tex_coord_offset: [f32; 2],
+    tex_coord_scale: [f32; 2],
     _padding2: [f32; 2],
-    _padding3: [f32; 4],
 }
 
 struct GpuTileData {
@@ -131,10 +132,15 @@ struct GpuTileData {
     bind_group: wgpu::BindGroup,
 }
 
+struct FallbackInfo {
+    gpu_data: Arc<GpuTileData>,
+    coord: TileCoord, // Coordinate of the fallback tile
+}
+
 enum TileState {
     Loading,
     Loaded(Arc<GpuTileData>),
-    Fallback(Arc<GpuTileData>),
+    Fallback(FallbackInfo),
 }
 
 struct GpuTileManager {
@@ -160,27 +166,28 @@ impl GpuTileManager {
         Self { tiles: std::collections::HashMap::new(), tile_size }
     }
 
-    fn find_fallback(&self, coord: &TileCoord) -> Option<Arc<GpuTileData>> {
+    fn find_parent_fallback(&self, coord: &TileCoord, max_lod: u32) -> Option<FallbackInfo> {
         let mut current_coord = coord.clone();
-        while current_coord.lod > 0 {
-            current_coord.lod -= 1;
+        while current_coord.lod < max_lod {
+            current_coord.lod += 1;
             current_coord.x /= 2;
             current_coord.y /= 2;
             if let Some(TileState::Loaded(data)) = self.tiles.get(&current_coord) {
-                return Some(data.clone());
+                return Some(FallbackInfo {
+                    gpu_data: data.clone(),
+                    coord: current_coord,
+                });
             }
         }
         None
     }
 
-    fn get_tile<'a>(&'a mut self, coord: &TileCoord, runtime: &Runtime, backend_url: &str, tile_sender: &UnboundedSender<(TileCoord, Vec<f32>)>, ctx: &egui::Context) -> &'a TileState {
+    fn get_tile<'a>(&'a mut self, coord: &TileCoord, max_lod: u32, runtime: &Runtime, backend_url: &str, tile_sender: &UnboundedSender<(TileCoord, Vec<f32>)>, ctx: &egui::Context) -> &'a TileState {
         if !self.tiles.contains_key(coord) {
-            let fallback = self.find_fallback(coord);
+            let fallback = self.find_parent_fallback(coord, max_lod);
             if let Some(fallback_data) = fallback {
-                println!("Requesting tile ({},{},{})", coord.x, coord.y, coord.lod); // Added debug print
                 self.tiles.insert(coord.clone(), TileState::Fallback(fallback_data));
             } else {
-                println!("Requesting tile ({},{},{})", coord.x, coord.y, coord.lod); // Added debug print
                 self.tiles.insert(coord.clone(), TileState::Loading);
             }
 
@@ -603,6 +610,7 @@ impl eframe::App for FitsViewApp {
                 let tile_sender_clone = self.tile_sender.clone();
                 let runtime_clone = self.runtime.clone();
                 let ctx_clone = ctx.clone();
+                let max_lod_clone = max_lod;
 
                 let callback = egui::PaintCallback {
                     rect,
@@ -610,31 +618,43 @@ impl eframe::App for FitsViewApp {
                         .prepare(move |_device, queue, _encoder, resources| {
                             let resources: &mut Custom3dResources = resources.get_mut().unwrap();
                             for tile_coord in &all_visible_tiles {
-                                resources.tile_manager.get_tile(tile_coord, &runtime_clone, &backend_url_clone, &tile_sender_clone, &ctx_clone);
+                                resources.tile_manager.get_tile(tile_coord, max_lod_clone, &runtime_clone, &backend_url_clone, &tile_sender_clone, &ctx_clone);
                             }
 
                             let mut tile_index = 0;
                             for tile_coord in &all_visible_tiles {
                                 if let Some(tile_state) = resources.tile_manager.tiles.get(tile_coord) {
-                                    if let TileState::Loaded(_) | TileState::Fallback(_) = tile_state {
-                                        let lod_scale = 2_u32.pow(tile_coord.lod) as f32;
-                                        let effective_tile_size = resources.tile_manager.tile_size as f32 * lod_scale;
-                                        let tile_offset_x = tile_coord.x as f32 * effective_tile_size;
-                                        let tile_offset_y = tile_coord.y as f32 * effective_tile_size;
+                                    let (tex_coord_offset, tex_coord_scale) = match tile_state {
+                                        TileState::Loaded(_) => ([0.0, 0.0], [1.0, 1.0]),
+                                        TileState::Fallback(fallback_info) => {
+                                            let delta_lod = fallback_info.coord.lod - tile_coord.lod;
+                                            let scale = 2_u32.pow(delta_lod) as f32;
+                                            let scale_u32 = scale as u32;
+                                            let x_offset = (tile_coord.x % scale_u32) as f32 / scale;
+                                            let y_offset = (scale - 1.0 - (tile_coord.y % scale_u32) as f32) / scale;
+                                            ([x_offset, y_offset], [1.0 / scale, 1.0 / scale])
+                                        }
+                                        _ => continue,
+                                    };
 
-                                        let uniforms = Uniforms {
-                                            transform: transform_matrix,
-                                            tile_offset: [tile_offset_x, tile_offset_y],
-                                            vmin: meta_clone.min_val,
-                                            vmax: meta_clone.max_val,
-                                            tile_size: effective_tile_size,
-                                            _padding1: 0.0,
-                                            _padding2: [0.0, 0.0],
-                                            _padding3: [0.0, 0.0, 0.0, 0.0],
-                                        };
-                                        queue.write_buffer(&resources.uniform_buffer, (tile_index * 256) as u64, bytemuck::cast_slice(&[uniforms]));
-                                        tile_index += 1;
-                                    }
+                                    let lod_scale = 2_u32.pow(tile_coord.lod) as f32;
+                                    let effective_tile_size = resources.tile_manager.tile_size as f32 * lod_scale;
+                                    let tile_offset_x = tile_coord.x as f32 * effective_tile_size;
+                                    let tile_offset_y = tile_coord.y as f32 * effective_tile_size;
+
+                                    let uniforms = Uniforms {
+                                        transform: transform_matrix,
+                                        tile_offset: [tile_offset_x, tile_offset_y],
+                                        vmin: meta_clone.min_val,
+                                        vmax: meta_clone.max_val,
+                                        tile_size: effective_tile_size,
+                                        _padding1: 0.0,
+                                        tex_coord_offset,
+                                        tex_coord_scale,
+                                        _padding2: [0.0, 0.0],
+                                    };
+                                    queue.write_buffer(&resources.uniform_buffer, (tile_index * 256) as u64, bytemuck::cast_slice(&[uniforms]));
+                                    tile_index += 1;
                                 }
                             }
                             Vec::new()
@@ -650,7 +670,7 @@ impl eframe::App for FitsViewApp {
                                 if let Some(tile_state) = resources.tile_manager.tiles.get(tile_coord) {
                                     let bind_group = match tile_state {
                                         TileState::Loaded(gpu_tile_data) => Some(&gpu_tile_data.bind_group),
-                                        TileState::Fallback(gpu_tile_data) => Some(&gpu_tile_data.bind_group),
+                                        TileState::Fallback(fallback_info) => Some(&fallback_info.gpu_data.bind_group),
                                         TileState::Loading => None,
                                     };
                                     if let Some(bind_group) = bind_group {
