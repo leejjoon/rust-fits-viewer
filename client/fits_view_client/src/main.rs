@@ -157,6 +157,7 @@ struct Custom3dResources {
     uniform_buffer: wgpu::Buffer,
     tile_manager: GpuTileManager,
     texture_bind_group_layout: wgpu::BindGroupLayout,
+    tiles_to_render: Vec<TileCoord>,
 }
 
 struct Custom3d;
@@ -182,7 +183,29 @@ impl GpuTileManager {
         None
     }
 
-    fn get_tile<'a>(&'a mut self, coord: &TileCoord, max_lod: u32, runtime: &Runtime, backend_url: &str, tile_sender: &UnboundedSender<(TileCoord, Vec<f32>)>, ctx: &egui::Context) -> &'a TileState {
+    fn find_child_fallbacks(&self, coord: &TileCoord) -> Vec<TileCoord> {
+        let mut children = Vec::new();
+        if coord.lod == 0 {
+            return children;
+        }
+
+        let child_lod = coord.lod - 1;
+        for dx in 0..2 {
+            for dy in 0..2 {
+                let child_coord = TileCoord {
+                    lod: child_lod,
+                    x: coord.x * 2 + dx,
+                    y: coord.y * 2 + dy,
+                };
+                if let Some(TileState::Loaded(_)) = self.tiles.get(&child_coord) {
+                    children.push(child_coord);
+                }
+            }
+        }
+        children
+    }
+
+    fn request_tile_if_needed(&mut self, coord: &TileCoord, max_lod: u32, runtime: &Runtime, backend_url: &str, tile_sender: &UnboundedSender<(TileCoord, Vec<f32>)>, ctx: &egui::Context) {
         if !self.tiles.contains_key(coord) {
             let fallback = self.find_parent_fallback(coord, max_lod);
             if let Some(fallback_data) = fallback {
@@ -208,7 +231,6 @@ impl GpuTileManager {
                 }
             });
         }
-        self.tiles.get(coord).unwrap()
     }
 
     fn upload_tile_data(&self, f32_data: &[f32], device: &wgpu::Device, queue: &wgpu::Queue, texture_bind_group_layout: &wgpu::BindGroupLayout) -> GpuTileData {
@@ -370,6 +392,7 @@ impl Custom3d {
             uniform_buffer,
             tile_manager,
             texture_bind_group_layout,
+            tiles_to_render: Vec::new(),
         });
 
         Self
@@ -593,46 +616,68 @@ impl eframe::App for FitsViewApp {
                 let max_lod = calculate_max_lod(image_size, meta.tile_size);
                 let ideal_lod = ((1.0 / self.viewport.zoom).log2().round() as u32).clamp(0, max_lod);
                 
-                let max_lod_tiles = calculate_visible_tiles(&core_viewport, render_size, image_size, meta.tile_size, max_lod);
-                let mut all_visible_tiles = max_lod_tiles;
-
-                if ideal_lod != max_lod {
-                    let ideal_lod_tiles = calculate_visible_tiles(&core_viewport, render_size, image_size, meta.tile_size, ideal_lod);
-                    all_visible_tiles.extend(ideal_lod_tiles);
-                }
+                let ideal_lod_tiles = calculate_visible_tiles(&core_viewport, render_size, image_size, meta.tile_size, ideal_lod);
 
                 let transform_matrix = create_image_to_ndc_matrix(&core_viewport, render_size);
 
                 let backend_url_clone = self.backend_url.clone();
                 let meta_clone = meta.clone();
-                let visible_tiles_clone = all_visible_tiles.clone();
-                let visible_tiles_debug = all_visible_tiles.clone();
                 let tile_sender_clone = self.tile_sender.clone();
                 let runtime_clone = self.runtime.clone();
                 let ctx_clone = ctx.clone();
                 let max_lod_clone = max_lod;
+                let ideal_lod_tiles_clone = ideal_lod_tiles.clone();
 
                 let callback = egui::PaintCallback {
                     rect,
                     callback: Arc::new(egui_wgpu::CallbackFn::new()
                         .prepare(move |_device, queue, _encoder, resources| {
                             let resources: &mut Custom3dResources = resources.get_mut().unwrap();
-                            for tile_coord in &all_visible_tiles {
-                                resources.tile_manager.get_tile(tile_coord, max_lod_clone, &runtime_clone, &backend_url_clone, &tile_sender_clone, &ctx_clone);
+                            
+                            resources.tiles_to_render.clear();
+                            for ideal_coord in &ideal_lod_tiles_clone {
+                                resources.tile_manager.request_tile_if_needed(ideal_coord, max_lod_clone, &runtime_clone, &backend_url_clone, &tile_sender_clone, &ctx_clone);
+
+                                match resources.tile_manager.tiles.get(ideal_coord) {
+                                    Some(TileState::Loaded(_)) => {
+                                        resources.tiles_to_render.push(ideal_coord.clone());
+                                    }
+                                    _ => { // Not loaded, so find a fallback
+                                        if resources.tile_manager.find_parent_fallback(ideal_coord, max_lod_clone).is_some() {
+                                            resources.tiles_to_render.push(ideal_coord.clone());
+                                        } else {
+                                            let child_fallbacks = resources.tile_manager.find_child_fallbacks(ideal_coord);
+                                            if !child_fallbacks.is_empty() {
+                                                resources.tiles_to_render.extend(child_fallbacks);
+                                            }
+                                        }
+                                    }
+                                }
                             }
 
                             let mut tile_index = 0;
-                            for tile_coord in &all_visible_tiles {
+                            for tile_coord in &resources.tiles_to_render {
                                 if let Some(tile_state) = resources.tile_manager.tiles.get(tile_coord) {
-                                    let (tex_coord_offset, tex_coord_scale) = match tile_state {
-                                        TileState::Loaded(_) => ([0.0, 0.0], [1.0, 1.0]),
+                                     let (tex_coord_offset, tex_coord_scale) = match tile_state {
+                                        TileState::Loaded(_) => ([0.0, 1.0], [1.0, -1.0]), // Flip Y-axis
                                         TileState::Fallback(fallback_info) => {
                                             let delta_lod = fallback_info.coord.lod - tile_coord.lod;
                                             let scale = 2_u32.pow(delta_lod) as f32;
                                             let scale_u32 = scale as u32;
-                                            let x_offset = (tile_coord.x % scale_u32) as f32 / scale;
-                                            let y_offset = (scale - 1.0 - (tile_coord.y % scale_u32) as f32) / scale;
-                                            ([x_offset, y_offset], [1.0 / scale, 1.0 / scale])
+
+                                            let x_scale = 1.0 / scale;
+                                            let y_scale = 1.0 / scale;
+
+                                            let x_offset = (tile_coord.x % scale_u32) as f32 * x_scale;
+                                            let y_offset = (tile_coord.y % scale_u32) as f32 * y_scale;
+                                            
+                                            // Combine quadrant selection with Y-flip
+                                            let final_x_offset = x_offset;
+                                            let final_y_offset = y_offset + y_scale;
+                                            let final_x_scale = x_scale;
+                                            let final_y_scale = -y_scale;
+
+                                            ([final_x_offset, final_y_offset], [final_x_scale, final_y_scale])
                                         }
                                         _ => continue,
                                     };
@@ -657,6 +702,7 @@ impl eframe::App for FitsViewApp {
                                     tile_index += 1;
                                 }
                             }
+                            
                             Vec::new()
                         })
                         .paint(move |_info, rpass, resources| {
@@ -666,7 +712,7 @@ impl eframe::App for FitsViewApp {
                             rpass.set_index_buffer(resources.index_buffer.slice(..), wgpu::IndexFormat::Uint16);
 
                             let mut tile_index = 0;
-                            for tile_coord in &visible_tiles_clone {
+                            for tile_coord in &resources.tiles_to_render {
                                 if let Some(tile_state) = resources.tile_manager.tiles.get(tile_coord) {
                                     let bind_group = match tile_state {
                                         TileState::Loaded(gpu_tile_data) => Some(&gpu_tile_data.bind_group),
@@ -687,7 +733,7 @@ impl eframe::App for FitsViewApp {
                 ui.painter().add(callback);
                 
                 if self.show_debug_overlay {
-                    self.draw_debug_overlay(ui, rect, &visible_tiles_debug, meta);
+                    self.draw_debug_overlay(ui, rect, &ideal_lod_tiles, meta);
                 }
             }
         });
