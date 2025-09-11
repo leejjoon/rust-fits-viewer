@@ -173,34 +173,30 @@ impl GpuTileManager {
         None
     }
 
-    fn get_tile<'a>(&'a mut self, coord: &TileCoord, runtime: &Runtime, backend_url: &str, tile_sender: &UnboundedSender<(TileCoord, Vec<f32>)>) -> &'a TileState {
+    fn get_tile<'a>(&'a mut self, coord: &TileCoord, runtime: &Runtime, backend_url: &str, tile_sender: &UnboundedSender<(TileCoord, Vec<f32>)>, ctx: &egui::Context) -> &'a TileState {
         if !self.tiles.contains_key(coord) {
-            // For LOD 0, we don't have any fallbacks, so we need to request it directly
-            if coord.lod == 0 {
-                // Debug: Base LOD 0 tile requested
-                self.tiles.insert(coord.clone(), TileState::Loading);
+            let fallback = self.find_fallback(coord);
+            if let Some(fallback_data) = fallback {
+                println!("Requesting tile ({},{},{})", coord.x, coord.y, coord.lod); // Added debug print
+                self.tiles.insert(coord.clone(), TileState::Fallback(fallback_data));
             } else {
-                // For higher LODs, try to find a fallback from lower LODs
-                if let Some(fallback_data) = self.find_fallback(coord) {
-                    // Debug: Using fallback tile
-                    self.tiles.insert(coord.clone(), TileState::Fallback(fallback_data));
-                    return self.tiles.get(coord).unwrap();
-                } else {
-                    // Debug: No fallback found for tile
-                    self.tiles.insert(coord.clone(), TileState::Loading);
-                }
+                println!("Requesting tile ({},{},{})", coord.x, coord.y, coord.lod); // Added debug print
+                self.tiles.insert(coord.clone(), TileState::Loading);
             }
 
             let backend_url = backend_url.to_string();
             let coord = coord.clone();
             let tile_sender = tile_sender.clone();
+            let ctx = ctx.clone();
             runtime.spawn(async move {
                 match fetch_tile_data(&backend_url, coord.lod, coord.x, coord.y).await {
                     Ok(data) => {
-                        let _ = tile_sender.send((coord, data));
+                        if tile_sender.send((coord, data)).is_ok() {
+                            ctx.request_repaint();
+                        }
                     }
                     Err(e) => {
-                        eprintln!("Failed to fetch tile: {}", e);
+                        println!("Failed to fetch tile ({}, {}, {}): {}", coord.lod, coord.x, coord.y, e);
                     }
                 }
             });
@@ -556,13 +552,13 @@ impl eframe::App for FitsViewApp {
                 let mut renderer = wgpu_render_state.renderer.write();
                 let resources: &mut Custom3dResources = renderer.paint_callback_resources.get_mut().unwrap();
                 for (coord, data) in received_tiles {
+                    println!("Loaded tile ({},{},{})", coord.x, coord.y, coord.lod);
                     let device = &wgpu_render_state.device;
                     let queue = &wgpu_render_state.queue;
                     let gpu_tile_data = resources.tile_manager.upload_tile_data(&data, device, queue, &resources.texture_bind_group_layout);
                     resources.tile_manager.tiles.insert(coord, TileState::Loaded(Arc::new(gpu_tile_data)));
                 }
             }
-            ctx.request_repaint();
         }
 
         egui::CentralPanel::default().show(ctx, |ui| {
@@ -588,21 +584,15 @@ impl eframe::App for FitsViewApp {
                 };
 
                 let max_lod = calculate_max_lod(image_size, meta.tile_size);
-                let ideal_lod = ((1.0 / self.viewport.zoom).log2().round() as i32).max(0) as u32;
+                let ideal_lod = ((1.0 / self.viewport.zoom).log2().round() as u32).clamp(0, max_lod);
                 
-                // Always request tiles at max_lod (lowest resolution) first
                 let max_lod_tiles = calculate_visible_tiles(&core_viewport, render_size, image_size, meta.tile_size, max_lod);
-                
-                // Then request tiles at ideal_lod (higher resolution) if different from max_lod
-                let ideal_lod_tiles = if ideal_lod < max_lod {
-                    calculate_visible_tiles(&core_viewport, render_size, image_size, meta.tile_size, ideal_lod)
-                } else {
-                    Vec::new()
-                };
-                
-                // Combine the tiles (max_lod tiles first, then ideal_lod tiles)
-                let mut all_visible_tiles = max_lod_tiles.clone();
-                all_visible_tiles.extend(ideal_lod_tiles);
+                let mut all_visible_tiles = max_lod_tiles;
+
+                if ideal_lod != max_lod {
+                    let ideal_lod_tiles = calculate_visible_tiles(&core_viewport, render_size, image_size, meta.tile_size, ideal_lod);
+                    all_visible_tiles.extend(ideal_lod_tiles);
+                }
 
                 let transform_matrix = create_image_to_ndc_matrix(&core_viewport, render_size);
 
@@ -612,25 +602,15 @@ impl eframe::App for FitsViewApp {
                 let visible_tiles_debug = all_visible_tiles.clone();
                 let tile_sender_clone = self.tile_sender.clone();
                 let runtime_clone = self.runtime.clone();
+                let ctx_clone = ctx.clone();
 
                 let callback = egui::PaintCallback {
                     rect,
                     callback: Arc::new(egui_wgpu::CallbackFn::new()
                         .prepare(move |_device, queue, _encoder, resources| {
                             let resources: &mut Custom3dResources = resources.get_mut().unwrap();
-                            // Request tiles in order of LOD (from lowest to highest resolution)
-                            // This ensures we load lower resolution tiles first for progressive enhancement
-                            for lod in (0..=max_lod).rev() {
-                                let tiles_for_lod: Vec<_> = all_visible_tiles.iter()
-                                    .filter(|t| t.lod == lod)
-                                    .collect();
-                                
-                                if !tiles_for_lod.is_empty() {
-                                    println!("Requesting {} tiles at LOD {}", tiles_for_lod.len(), lod);
-                                    for tile_coord in tiles_for_lod {
-                                        resources.tile_manager.get_tile(tile_coord, &runtime_clone, &backend_url_clone, &tile_sender_clone);
-                                    }
-                                }
+                            for tile_coord in &all_visible_tiles {
+                                resources.tile_manager.get_tile(tile_coord, &runtime_clone, &backend_url_clone, &tile_sender_clone, &ctx_clone);
                             }
 
                             let mut tile_index = 0;
