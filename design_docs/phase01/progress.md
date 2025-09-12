@@ -77,7 +77,7 @@ The project has successfully implemented the fundamental data pipeline and rende
 
 1.  **User Interactions (COMPLETE):**
     - ✅ Mouse drag → pan functionality (with proper Y-axis inversion and sensitivity scaling)
-    - ✅ Scroll → zoom controls (0.1x to 10.0x range with hover detection)
+    - ✅ Scroll → zoom controls (0.1x to 10.0x range with hover detection, centered on mouse cursor)
     - ✅ Alt + Scroll → rotation controls (smooth rotation angle accumulation)
     - ✅ Keyboard shortcuts: `R` (reset view), `F` (fit to window), `Q` (quit)
 
@@ -125,19 +125,47 @@ The project has successfully implemented the fundamental data pipeline and rende
     - ✅ All tests pass showing correct tile visibility (4 tiles vs previous 0)
     - ✅ Robust testing infrastructure for catching rendering regressions
 
+**✅ COMPLETED (Debug & User Experience Enhancements):**
+
+7.  **Debug Overlay System (COMPLETE):**
+    - ✅ **DEBUG OVERLAY RESTORED:** Comprehensive visual debugging system implemented
+    - ✅ Toggle with 'D' key for real-time debugging during development
+    - ✅ Render screen boundary visualization (black rectangle outline)
+    - ✅ Image screen extent display (red rectangle showing image bounds)
+    - ✅ Visible tile boundaries with coordinates (green rectangles with x,y,z labels)
+    - ✅ Real-time debug information panel (zoom, center position, visible tile count)
+    - ✅ Proper coordinate transformations from Y-up image space to Y-down screen space
+    - ✅ LOD scaling support for accurate tile positioning at all zoom levels
+    - ✅ Integrated seamlessly into main rendering loop with egui painter API
+
+8.  **Keyboard Shortcuts & User Controls (COMPLETE):**
+    - ✅ **QUIT FUNCTIONALITY RESTORED:** 'Q' key properly closes application
+    - ✅ Enhanced keyboard input handling with frame parameter passing
+    - ✅ Complete control scheme: 'D' (debug overlay), 'R' (reset viewport), 'Q' (quit)
+    - ✅ Consistent input handling across all viewport interactions
+    - ✅ Fixed coordinate system issues in debug overlay Y-axis transformations
+
+9.  **Progressive Loading & Tile Fallback (COMPLETE):**
+    - ✅ Implemented a tile loading strategy that prioritizes visible tiles.
+    - ✅ While waiting for ideal resolution tiles, the client now renders fallback tiles.
+    - ✅ The fallback system uses a parent-first strategy, looking for coarser-LOD tiles that cover the desired area.
+    - ✅ If no parent fallback is available, the system attempts to use higher-resolution child tiles to provide partial coverage.
+    - ✅ Asynchronous tile fetching is implemented using `tokio`, preventing the UI from freezing while waiting for network responses.
+    - ✅ Loaded tiles are cached in GPU memory for fast rendering.
+
 **📋 PENDING (Priority Order):**
 
-7.  **Tile Cache System:**
+9.  **Tile Cache System:**
     - Implement LRU tile cache with GPU memory budget (512 MB target)
     - Add tile prefetching along motion vectors
     - Implement request cancellation on zoom changes
 
-8.  **Advanced Rendering Features:**
+10. **Advanced Rendering Features:**
     - Add fragment shader support for different stretch modes (linear, log, sqrt, asinh)
     - Implement colormap texture support (1D texture lookup)
     - Add NaN value handling with reserved colormap entry
 
-9.  **Performance & Polish:**
+11. **Performance & Polish:**
     - Add async tile loading for smooth interaction
     - Implement visual feedback for loading states
     - Add error handling for network failures
