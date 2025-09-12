@@ -102,7 +102,34 @@ cases_lod = [
     ),
 ]
 
-if False:
+
+generator1 = TestCaseGenerator(
+    # render_size=(517, 298),
+    render_size=(600, 400),
+    image_size=(1024, 1024),
+    tile_size=256
+)
+
+cases_fail = [
+    generator1.generate_test_case(
+        name="fail01",
+        zoom=0.586,
+        pan_offset=(0.0, 0.0),
+    ),
+]
+
+cases_miss = [
+    generator1.generate_test_case(
+        name="miss01",
+        zoom=1.1443,
+        pan_offset=(343.8, 468.),
+    ),
+]
+
+
+cases = cases_miss
+
+if True:
     import matplotlib.pyplot as plt
     fig = plt.figure(1)
     fig.clf()
@@ -117,6 +144,7 @@ if False:
     testdir = Path("client/fits_view_client/tests/test_cases")
     testdir.mkdir(exist_ok=True)
 
+    # for case in cases_miss:
     for case in cases_simple + cases_large + cases_lod:
         filename = case["name"] + ".json"
         filepath = testdir / filename

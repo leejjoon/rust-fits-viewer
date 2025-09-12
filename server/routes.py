@@ -10,15 +10,16 @@ router = APIRouter()
 # Create a global numpy array to simulate a FITS file with circular hole
 def create_image_with_hole():
     # Create base gradient image
-    image = np.arange(1024 * 1024, dtype=np.float32).reshape((1024, 1024))
+    ny, nx = 2048, 2048
+    image = np.arange(ny * nx, dtype=np.float32).reshape((ny, nx))
     image = (image / image.max() * 255).astype(np.float32)
     
     # Create circular hole at center with radius = 1/3 of image size
-    center_y, center_x = 512, 512  # Center of 1024x1024 image
-    radius = 1024 // 3  # 1/3 of image size = ~341 pixels
+    center_y, center_x = ny//2, nx//2  # Center of 1024x1024 image
+    radius = nx // 10 
     
     # Create coordinate grids
-    y, x = np.ogrid[:1024, :1024]
+    y, x = np.ogrid[:ny, :nx]
     
     # Calculate distance from center
     distance = np.sqrt((x - center_x)**2 + (y - center_y)**2)
